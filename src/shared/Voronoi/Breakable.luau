@@ -1,0 +1,537 @@
+-- A wall (or any block or mesh part) that takes repeated hits.
+--
+--   local Breakable = require(ReplicatedStorage.Voronoi.Breakable)
+--   local wall = Breakable.get(part, settings)
+--   wall:hit(position, direction, seed)   -- yields
+--
+-- Each hit punches a hole: chunks inside `holeRadius` fly along the shot and the rest
+-- stays anchored. Damaged walls do not decay into clutter: slivers and unsupported
+-- fragments fall off, debris despawns and is capped, and after enough damage the whole
+-- wall collapses. Every removed piece frees its editable mesh.
+--
+-- Call it on one side only for any given wall: on the server so every player agrees
+-- on the holes, or on each client for effects that do not affect gameplay.
+
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local Voronoi = require(script.Parent)
+
+local ROOT_LINK = "BreakableRoot"
+local FRAGMENT_FOLDER = "VoronoiWalls"
+local DEBRIS_FOLDER = "VoronoiDebris"
+local FADE_SECONDS = 0.5
+local CLEARANCE_SECONDS = 0.15 -- debris passes through its neighbours while leaving the hole
+local TOUCHING = 0.05 -- studs
+local SMALL_MESH = 300 -- triangles; fragments this small are cut here, not on workers
+
+local DEFAULTS = {
+	holeRadius = 3, -- studs
+	maxHits = 8, -- the wall collapses on this hit
+	collapseBelow = 0.45, -- ...or when this fraction of its material is left
+	maxFragments = 90, -- ...or when it would need more parts than this
+	minFragmentVolume = 0.6, -- cubic studs; smaller fragments fall off
+	debrisLifetime = 4, -- seconds
+	maxDebris = 120, -- loose pieces alive across all walls
+	rebuildAfter = 20 :: number | boolean, -- seconds without a hit; false never rebuilds
+	launchSpeed = 70, -- studs per second along the shot
+	spread = 25, -- studs per second away from the shot line
+	debrisCollides = true,
+	fracture = {} :: { [string]: any }, -- Voronoi options used for every cut
+}
+
+local Breakable = {}
+Breakable.__index = Breakable
+
+local registry: { [BasePart]: any } = {}
+local debris: { any } = {} -- oldest first
+
+local function folder(name: string): Instance
+	local found = workspace:FindFirstChild(name)
+	if not found then
+		found = Instance.new("Folder")
+		found.Name = name
+		found.Parent = workspace
+	end
+	return found :: Instance
+end
+
+-- The two axes spanning the wall's face and the thin one, as component indices.
+local function axes(size: Vector3): (number, number, number)
+	if size.X <= size.Y and size.X <= size.Z then
+		return 3, 2, 1
+	elseif size.Y <= size.Z then
+		return 1, 3, 2
+	end
+	return 1, 2, 3
+end
+
+local function component(v: Vector3, axis: number): number
+	return if axis == 1 then v.X elseif axis == 2 then v.Y else v.Z
+end
+
+-- Sites for one hit, in world space, and for each whether its cell is blown out.
+function Breakable.holeSites(wall: CFrame, size: Vector3, impact: Vector3, radius: number, seed: number): ({ Vector3 }, { boolean })
+	local random = Random.new(seed)
+	local u, v, thin = axes(size)
+	local localImpact = wall:PointToObjectSpace(impact)
+	local centreU, centreV = component(localImpact, u), component(localImpact, v)
+	-- rings of sites: distance in hole radii, and how many
+	local rings = { { 0, 1 }, { 0.5, 4 }, { 0.82, 6 }, { 1.35, 7 }, { 2.3, 7 } }
+
+	local sites, flies = {}, {}
+	for _, ring in rings do
+		local distance, count = ring[1], ring[2]
+		local start = random:NextNumber(0, 2 * math.pi)
+		for k = 1, count do
+			local angle = start + (k + random:NextNumber(-0.3, 0.3)) * 2 * math.pi / count
+			local r = distance * radius * (1 + random:NextNumber(-0.1, 0.1))
+			local values = { 0, 0, 0 }
+			values[u] = centreU + math.cos(angle) * r
+			values[v] = centreV + math.sin(angle) * r
+			-- sites at different depths tilt the cut faces
+			values[thin] = random:NextNumber(-0.3, 0.3) * component(size, thin)
+			table.insert(sites, wall:PointToWorldSpace(Vector3.new(values[1], values[2], values[3])))
+			table.insert(flies, r < radius)
+		end
+	end
+	return sites, flies
+end
+
+-- Which boxes rest on the ground, directly or through other boxes. Returns a set of
+-- indices.
+function Breakable.supported(boxes: { { min: Vector3, max: Vector3 } }, ground: number): { [number]: boolean }
+	local standing: { [number]: boolean } = {}
+	local queue = {}
+	for i, box in boxes do
+		if box.min.Y <= ground + TOUCHING then
+			standing[i] = true
+			table.insert(queue, i)
+		end
+	end
+	while #queue > 0 do
+		local a = boxes[table.remove(queue) :: number]
+		for i, b in boxes do
+			if
+				not standing[i]
+				and a.min.X <= b.max.X + TOUCHING and b.min.X <= a.max.X + TOUCHING
+				and a.min.Y <= b.max.Y + TOUCHING and b.min.Y <= a.max.Y + TOUCHING
+				and a.min.Z <= b.max.Z + TOUCHING and b.min.Z <= a.max.Z + TOUCHING
+			then
+				standing[i] = true
+				table.insert(queue, i)
+			end
+		end
+	end
+	return standing
+end
+
+-- A part's bounding box in the space of `frame`.
+local function boxIn(frame: CFrame, part: BasePart): { min: Vector3, max: Vector3 }
+	local relative = frame:ToObjectSpace(part.CFrame)
+	local half = part.Size / 2
+	local reach = relative.XVector:Abs() * half.X + relative.YVector:Abs() * half.Y + relative.ZVector:Abs() * half.Z
+	return { min = relative.Position - reach, max = relative.Position + reach }
+end
+
+function Breakable.new(root: BasePart, settings: { [string]: any }?)
+	local options = table.clone(DEFAULTS)
+	for key, value in settings or {} do
+		if DEFAULTS[key] == nil then
+			error(`Breakable: unknown setting "{key}"`, 2)
+		end
+		(options :: any)[key] = value
+	end
+	local self = setmetatable({
+		root = root,
+		settings = options,
+		hits = 0,
+		collapsed = false,
+		destroyed = false,
+		_standing = {} :: { any },
+		_original = nil :: any, -- the root's properties while it is hidden
+		_volume = 0,
+		_generation = 0,
+		_hitNumber = 0,
+		_busy = false,
+	}, Breakable)
+	registry[root] = self
+	return self
+end
+
+-- The wall for `root`, creating it with `settings` the first time.
+function Breakable.get(root: BasePart, settings: { [string]: any }?)
+	return registry[root] or Breakable.new(root, settings)
+end
+
+-- The wall part a fragment came from, or nil. Works on the client for server walls.
+function Breakable.rootOf(part: Instance): BasePart?
+	local link = part:FindFirstChild(ROOT_LINK)
+	return if link and link:IsA("ObjectValue") then link.Value :: BasePart? else nil
+end
+
+function Breakable:fragments(): { BasePart }
+	local parts = {}
+	for _, record in self._standing do
+		table.insert(parts, record.part)
+	end
+	return parts
+end
+
+function Breakable:trianglesOf(part: BasePart): number
+	for _, record in self._standing do
+		if record.part == part then
+			return #record.mesh.caps
+		end
+	end
+	return 0
+end
+
+function Breakable:volumeOf(part: BasePart): number
+	for _, record in self._standing do
+		if record.part == part then
+			return record.volume
+		end
+	end
+	return 0
+end
+
+-- Loose pieces alive: of this wall, or of every wall when called as Breakable.debrisCount().
+function Breakable.debrisCount(self: any?): number
+	if not self then
+		return #debris
+	end
+	local count = 0
+	for _, entry in debris do
+		if entry.owner == self then
+			count += 1
+		end
+	end
+	return count
+end
+
+local function removeDebris(entry: any)
+	local index = table.find(debris, entry)
+	if index then
+		table.remove(debris, index)
+		entry.release()
+	end
+end
+
+function Breakable:_throw(record: any, velocity: Vector3, spin: Vector3)
+	local options = self.settings
+	local part = record.part :: BasePart
+	part.Anchored = false
+	part.CanQuery = false -- shots and clicks pass through rubble
+	part.CanTouch = false
+	part.CanCollide = false
+	part.Parent = folder(DEBRIS_FOLDER)
+	if RunService:IsRunning() and RunService:IsServer() then
+		part:SetNetworkOwner(nil)
+	end
+	part.AssemblyLinearVelocity = velocity
+	part.AssemblyAngularVelocity = spin
+
+	local entry = { owner = self, release = record.release }
+	table.insert(debris, entry)
+	if options.debrisCollides then
+		task.delay(CLEARANCE_SECONDS, function()
+			if part.Parent then
+				part.CanCollide = true
+			end
+		end)
+	end
+	local lifetime = options.debrisLifetime
+	task.delay(math.max(lifetime - FADE_SECONDS, 0), function()
+		if part.Parent and lifetime > FADE_SECONDS then
+			TweenService:Create(part, TweenInfo.new(FADE_SECONDS), { Transparency = 1 }):Play()
+		end
+	end)
+	task.delay(lifetime, removeDebris, entry)
+
+	while #debris > options.maxDebris do
+		removeDebris(debris[1])
+	end
+end
+
+-- Is there anything left to hit along the shot at this point?
+function Breakable:_solidAt(position: Vector3, direction: Vector3): boolean
+	if #self._standing == 0 then
+		return self.hits == 0
+	end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = self:fragments()
+	local depth = self.root.Size.Magnitude
+	local reach = math.min(self.root.Size.X, self.root.Size.Y, self.root.Size.Z) + 1
+	local found = workspace:Raycast(position - direction * 1, direction * math.min(reach * 2, depth), params)
+	return found ~= nil
+end
+
+function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, applyAt: number?)
+	local options = self.settings
+	local root = self.root :: BasePart
+	local generation = self._generation
+	if not self:_solidAt(position, direction) then
+		return nil
+	end
+
+	local radius = options.holeRadius
+	local sites, flies = Breakable.holeSites(root.CFrame, root.Size, position, radius, seed)
+	local u, v, thin = axes(root.Size)
+	local impact = root.CFrame:PointToObjectSpace(position)
+
+	-- The root on the first hit, afterwards every fragment the hole can reach.
+	-- Fragments wholly inside the hole are blown out as they are.
+	local targets, whole = {}, {}
+	if self.hits == 0 then
+		table.insert(targets, { part = root, mesh = nil })
+	else
+		for _, record in self._standing do
+			local box = boxIn(root.CFrame, record.part)
+			local lowU, highU = component(box.min, u) - component(impact, u), component(box.max, u) - component(impact, u)
+			local lowV, highV = component(box.min, v) - component(impact, v), component(box.max, v) - component(impact, v)
+			local nearU, nearV = math.max(lowU, 0, -highU), math.max(lowV, 0, -highV)
+			local farU, farV = math.max(-lowU, highU), math.max(-lowV, highV)
+			if farU * farU + farV * farV <= radius * radius then
+				table.insert(whole, record)
+			elseif nearU * nearU + nearV * nearV <= radius * radius then
+				table.insert(targets, record)
+			end
+		end
+		-- the far ring only shapes the cracks in an intact wall; on fragments it would
+		-- just make more, smaller ones
+		local nearSites, nearFlies = {}, {}
+		for i, site in sites do
+			local offset = root.CFrame:PointToObjectSpace(site) - impact
+			local planar = Vector2.new(component(offset, u), component(offset, v)).Magnitude
+			if planar <= radius * 1.6 then
+				table.insert(nearSites, site)
+				table.insert(nearFlies, flies[i])
+			end
+		end
+		sites, flies = nearSites, nearFlies
+	end
+	if #targets + #whole == 0 then
+		return nil
+	end
+
+	-- Cut everything first, so the wall changes in a single step. The cuts run side by
+	-- side: one after another they would each cost at least a frame.
+	local cuts = {}
+	local failure: any = nil
+	local pending = #targets
+	local started = os.clock()
+	for i, target in targets do
+		task.spawn(function()
+			local ok, err = pcall(function()
+				local localSites = table.create(#sites)
+				for k, site in sites do
+					localSites[k] = target.part.CFrame:PointToObjectSpace(site)
+				end
+				local config = table.clone(options.fracture)
+				config.seed = seed
+				-- handing a small mesh to workers costs more than cutting it
+				if target.mesh and #target.mesh.tris / 3 <= SMALL_MESH then
+					config.workers = 0
+				end
+				cuts[i] = { target = target, result = Voronoi.fracture(target.part, localSites, config, target.mesh) }
+			end)
+			if not ok then
+				failure = failure or err
+			end
+			pending -= 1
+		end)
+	end
+	while pending > 0 do
+		task.wait()
+	end
+	local seconds = os.clock() - started
+	if applyAt then
+		while os.clock() < applyAt and generation == self._generation do
+			task.wait()
+		end
+	end
+	if failure or generation ~= self._generation then
+		for _, cut in cuts do
+			cut.result:destroy()
+		end
+		if failure then
+			error(failure, 0)
+		end
+		return nil
+	end
+
+	local random = Random.new(seed)
+	local first = self.hits == 0
+	if first then
+		self._original = {
+			Transparency = root.Transparency,
+			CanCollide = root.CanCollide,
+			CanQuery = root.CanQuery,
+			CanTouch = root.CanTouch,
+		}
+		root.Transparency = 1
+		root.CanCollide = false
+		root.CanQuery = false
+		root.CanTouch = false
+		self._volume = 0
+	else
+		for _, cut in cuts do
+			local index = table.find(self._standing, cut.target)
+			if index then
+				table.remove(self._standing, index)
+				cut.target.release()
+			end
+		end
+	end
+
+	local report = { targets = #targets + #whole, flying = 0, dropped = 0, standing = 0, collapsed = false, remaining = 0, seconds = seconds }
+	local function spin(scale: number): Vector3
+		return random:NextUnitVector() * scale
+	end
+	local function drop(record: any)
+		report.dropped += 1
+		self:_throw(record, Vector3.zero, spin(2))
+	end
+
+	local function launch(record: any)
+		report.flying += 1
+		local away = record.part.Position - position
+		local sideways = away - direction * away:Dot(direction)
+		local off = math.min(sideways.Magnitude / radius, 1.5)
+		local velocity = direction * options.launchSpeed * math.clamp(1.15 - off * 0.6, 0.35, 1.15)
+		if sideways.Magnitude > 1e-3 then
+			velocity += sideways.Unit * options.spread * off
+		end
+		self:_throw(record, velocity + spin(options.spread * 0.3), spin(14))
+	end
+
+	for _, record in whole do
+		local index = table.find(self._standing, record)
+		if index then
+			table.remove(self._standing, index)
+			launch(record)
+		end
+	end
+
+	local standingParts = folder(FRAGMENT_FOLDER)
+	for _, cut in cuts do
+		for _, piece in cut.result.pieces do
+			if first then
+				self._volume += piece.volume
+			end
+			local record = { part = piece.part, mesh = piece.mesh, volume = piece.volume, release = piece.destroy }
+			local link = Instance.new("ObjectValue")
+			link.Name = ROOT_LINK
+			link.Value = root
+			link.Parent = piece.part
+			if flies[piece.siteIndex] then
+				launch(record)
+			elseif piece.volume < options.minFragmentVolume then
+				drop(record)
+			else
+				piece.part.Anchored = true
+				piece.part.Parent = standingParts
+				table.insert(self._standing, record)
+			end
+		end
+	end
+
+	-- anything no longer connected to the ground falls (walls only, not floors)
+	if thin ~= 2 then
+		local boxes = {}
+		for i, record in self._standing do
+			boxes[i] = boxIn(root.CFrame, record.part)
+		end
+		local held = Breakable.supported(boxes, -root.Size.Y / 2)
+		for i = #self._standing, 1, -1 do
+			if not held[i] then
+				drop(table.remove(self._standing, i))
+			end
+		end
+	end
+
+	self.hits += 1
+	local left = 0
+	for _, record in self._standing do
+		left += record.volume
+	end
+	report.remaining = if self._volume > 0 then left / self._volume else 0
+
+	if self.hits >= options.maxHits or report.remaining <= options.collapseBelow or #self._standing > options.maxFragments then
+		self.collapsed = true
+		report.collapsed = true
+		for _, record in self._standing do
+			local away = record.part.Position - position
+			local push = if away.Magnitude > 1e-3 then away.Unit * options.spread * 0.2 else Vector3.zero
+			self:_throw(record, direction * options.launchSpeed * 0.15 + push, spin(3))
+		end
+		table.clear(self._standing)
+	end
+	report.standing = #self._standing
+	return report
+end
+
+-- Yields until the hit has been applied. `direction` is the shot's travel direction.
+-- `applyAt` (an os.clock() time) holds the result back, e.g. until a shell arrives.
+-- Returns nil if there was nothing to hit or the wall was reset meanwhile.
+function Breakable:hit(position: Vector3, direction: Vector3, seed: number, applyAt: number?)
+	local generation = self._generation
+	-- one hit at a time: each cuts what the previous one left
+	while self._busy do
+		task.wait()
+	end
+	if self.destroyed or self.collapsed or generation ~= self._generation then
+		return nil
+	end
+	self._busy = true
+	local ok, report = pcall(self._apply, self, position, direction.Unit, seed, applyAt)
+	self._busy = false
+	if not ok then
+		error(report, 0)
+	end
+
+	if report and generation == self._generation then
+		self._hitNumber += 1
+		local number = self._hitNumber
+		if self.settings.rebuildAfter then
+			task.delay(self.settings.rebuildAfter :: number, function()
+				if number == self._hitNumber and generation == self._generation then
+					self:reset()
+				end
+			end)
+		end
+	end
+	return report
+end
+
+-- Rebuilds the wall, removing its fragments and debris.
+function Breakable:reset()
+	self._generation += 1
+	for _, record in self._standing do
+		record.release()
+	end
+	table.clear(self._standing)
+	for i = #debris, 1, -1 do
+		if debris[i].owner == self then
+			removeDebris(debris[i])
+		end
+	end
+	if self._original then
+		for property, value in self._original do
+			(self.root :: any)[property] = value
+		end
+		self._original = nil
+	end
+	self.hits = 0
+	self.collapsed = false
+end
+
+function Breakable:destroy()
+	self:reset()
+	self.destroyed = true
+	registry[self.root] = nil
+end
+
+return Breakable

@@ -1,0 +1,40 @@
+{
+  "name": "mesh-voronoi",
+  "servePlaceIds": [98017474124994],
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$ignoreUnknownInstances": true,
+      "Voronoi": {
+        "$path": "src/shared/Voronoi"
+      },
+      "VoronoiTests": {
+        "$path": "tests"
+      },
+      "VoronoiDemo": {
+        "$path": "src/demo/shared"
+      }
+    },
+
+    "ServerScriptService": {
+      "$ignoreUnknownInstances": true,
+      "Script": {
+        "$path": "src/server"
+      },
+      "VoronoiDemo": {
+        "$path": "src/demo/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "$ignoreUnknownInstances": true,
+      "StarterPlayerScripts": {
+        "$ignoreUnknownInstances": true,
+        "VoronoiDemo": {
+          "$path": "src/demo/client"
+        }
+      }
+    }
+  }
+}
