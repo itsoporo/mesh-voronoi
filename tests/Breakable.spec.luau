@@ -74,7 +74,77 @@ return function(lib)
 		return total, smallest
 	end
 
+	-- eleven sites: what flies, and the ring just outside that bounds the hole
+	local RINGS = {
+		{ distance = 0, count = 1, flies = true },
+		{ distance = 0.8, count = 3, flies = true },
+		{ distance = 1.3, count = 5, flies = false },
+		{ distance = 2.8, count = 2, flies = false },
+	}
+
 	return {
+		custom_rings = function()
+			local Breakable = load()
+			local sites, flies = Breakable.holeSites(CFrame.new(), Vector3.new(30, 14, 2), Vector3.new(0, 0, -1), 3.5, 7, RINGS)
+			local flying = 0
+			for _, f in flies do
+				if f then
+					flying += 1
+				end
+			end
+			assert(#sites == 11 and flying == 4, `{#sites} sites, {flying} flying`)
+		end,
+
+		ring_setting_is_used = test({ rings = RINGS, holeRadius = 3.5 }, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			local report = wall:hit(point, direction, 1)
+			assert(report.flying + report.standing + report.dropped <= 13, "more pieces than 11 sites make")
+		end),
+
+		radius_per_hit = function()
+			local left = {}
+			for i, radius in { 3, 6 } do
+				test(nil, function(wall, part)
+					local point, direction = face(part, 0, 0)
+					wall:hit(point, direction, 5, nil, radius)
+					left[i] = volumes(wall)
+				end)()
+			end
+			assert(left[2] < left[1] - 20, `{left[1]} then {left[2]}`)
+		end,
+
+		collapse_throws_everything = test(nil, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local standing = #wall:fragments()
+			assert(wall:collapse() == standing and #wall:fragments() == 0 and wall.collapsed)
+			assert(part.Transparency == 1 and wall:hit(point, direction, 2) == nil)
+			wall:reset()
+			assert(part.Transparency == 0 and part.CanCollide and not wall.collapsed)
+		end),
+
+		collapse_untouched = test(nil, function(wall, part)
+			assert(wall:collapse() == 0 and wall.collapsed)
+			assert(part.Transparency == 1 and not part.CanCollide and not part.CanQuery)
+			wall:reset()
+			assert(part.Transparency == 0 and part.CanCollide and part.CanQuery)
+		end),
+
+		collapse_during_a_hit = test(nil, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			local report, done = "unset", false
+			task.spawn(function()
+				report = wall:hit(point, direction, 1, os.clock() + 0.5)
+				done = true
+			end)
+			wall:collapse()
+			local started = os.clock()
+			while not done and os.clock() - started < 10 do
+				task.wait()
+			end
+			assert(done and report == nil and #wall:fragments() == 0 and wall.collapsed)
+		end),
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()

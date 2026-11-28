@@ -51,6 +51,7 @@ local wall = Breakable.get(wallPart, { holeRadius = 3, maxHits = 8 })
 local report = wall:hit(hitPosition, shellDirection, seed)   -- yields
 -- report: { flying, dropped, standing, collapsed, remaining, targets, seconds } or nil
 Breakable.rootOf(someFragment)                               -- the wall a fragment came from
+wall:collapse()                                              -- bring it down now
 wall:reset()
 ```
 
@@ -71,7 +72,8 @@ argument to open the hole exactly on impact.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `holeRadius` | 3 | studs; real holes come out slightly larger |
+| `holeRadius` | 3 | studs; real holes come out slightly larger. `hit`'s fifth argument overrides it per shot |
+| `rings` | `false` | custom hole layout: `{ { distance, count, flies? }, ... }`, distances in hole radii |
 | `maxHits` | 8 | the wall collapses on this hit |
 | `collapseBelow` | 0.45 | ...or when this fraction of material is left |
 | `maxFragments` | 90 | ...or above this many standing parts |

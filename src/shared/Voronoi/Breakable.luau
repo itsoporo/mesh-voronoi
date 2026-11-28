@@ -37,6 +37,7 @@ local DEFAULTS = {
 	launchSpeed = 70, -- studs per second along the shot
 	spread = 25, -- studs per second away from the shot line
 	debrisCollides = true,
+	rings = false :: any, -- { Ring } to lay out each hole's sites differently; false for the standard 25
 	-- Voronoi options for every cut; yours are merged over these
 	fracture = {
 		workers = 0, -- wall fragments are tiny: workers cost more than they save
@@ -44,6 +45,18 @@ local DEFAULTS = {
 		simplify = true, -- far fewer triangles per fragment
 		meshContent = "opaque", -- fragments hold no editable memory, however many pile up
 	} :: { [string]: any },
+}
+
+-- Sites of one hole: `count` of them around the impact at `distance` hole radii. `flies` says whether their cells are
+-- blown out; left out, a cell flies if its site is closer than the radius.
+export type Ring = { distance: number, count: number, flies: boolean? }
+
+local STANDARD_RINGS: { Ring } = {
+	{ distance = 0, count = 1 },
+	{ distance = 0.5, count = 4 },
+	{ distance = 0.82, count = 6 },
+	{ distance = 1.35, count = 7 },
+	{ distance = 2.3, count = 7 },
 }
 
 local Breakable = {}
@@ -77,17 +90,21 @@ local function component(v: Vector3, axis: number): number
 end
 
 -- Sites for one hit, in world space, and for each whether its cell is blown out.
-function Breakable.holeSites(wall: CFrame, size: Vector3, impact: Vector3, radius: number, seed: number): ({ Vector3 }, { boolean })
+function Breakable.holeSites(
+	wall: CFrame,
+	size: Vector3,
+	impact: Vector3,
+	radius: number,
+	seed: number,
+	rings: { Ring }?
+): ({ Vector3 }, { boolean })
 	local random = Random.new(seed)
 	local u, v, thin = axes(size)
 	local localImpact = wall:PointToObjectSpace(impact)
 	local centreU, centreV = component(localImpact, u), component(localImpact, v)
-	-- rings of sites: distance in hole radii, and how many
-	local rings = { { 0, 1 }, { 0.5, 4 }, { 0.82, 6 }, { 1.35, 7 }, { 2.3, 7 } }
-
 	local sites, flies = {}, {}
-	for _, ring in rings do
-		local distance, count = ring[1], ring[2]
+	for _, ring in rings or STANDARD_RINGS do
+		local distance, count = ring.distance, ring.count
 		local start = random:NextNumber(0, 2 * math.pi)
 		for k = 1, count do
 			local angle = start + (k + random:NextNumber(-0.3, 0.3)) * 2 * math.pi / count
@@ -98,7 +115,7 @@ function Breakable.holeSites(wall: CFrame, size: Vector3, impact: Vector3, radiu
 			-- sites at different depths tilt the cut faces
 			values[thin] = random:NextNumber(-0.3, 0.3) * component(size, thin)
 			table.insert(sites, wall:PointToWorldSpace(Vector3.new(values[1], values[2], values[3])))
-			table.insert(flies, r < radius)
+			table.insert(flies, if ring.flies == nil then r < radius else ring.flies :: boolean)
 		end
 	end
 	return sites, flies
@@ -278,6 +295,21 @@ function Breakable:_throw(record: any, velocity: Vector3, spin: Vector3)
 	end
 end
 
+-- The wall part stays as the anchor for its fragments, unseen and untouchable, until `reset`.
+function Breakable:_hideRoot()
+	local root = self.root :: BasePart
+	self._original = {
+		Transparency = root.Transparency,
+		CanCollide = root.CanCollide,
+		CanQuery = root.CanQuery,
+		CanTouch = root.CanTouch,
+	}
+	root.Transparency = 1
+	root.CanCollide = false
+	root.CanQuery = false
+	root.CanTouch = false
+end
+
 -- Is there anything left to hit along the shot at this point?
 function Breakable:_solidAt(position: Vector3, direction: Vector3): boolean
 	if #self._standing == 0 then
@@ -292,7 +324,7 @@ function Breakable:_solidAt(position: Vector3, direction: Vector3): boolean
 	return found ~= nil
 end
 
-function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, applyAt: number?)
+function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, applyAt: number?, holeRadius: number?)
 	local options = self.settings
 	local root = self.root :: BasePart
 	local generation = self._generation
@@ -307,8 +339,8 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 		return nil
 	end
 
-	local radius = options.holeRadius
-	local sites, flies = Breakable.holeSites(root.CFrame, root.Size, position, radius, seed)
+	local radius = holeRadius or options.holeRadius
+	local sites, flies = Breakable.holeSites(root.CFrame, root.Size, position, radius, seed, options.rings or nil)
 	local u, v, thin = axes(root.Size)
 	local impact = root.CFrame:PointToObjectSpace(position)
 
@@ -400,16 +432,7 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 		local random = Random.new(seed)
 		local first = self.hits == 0
 		if first then
-			self._original = {
-				Transparency = root.Transparency,
-				CanCollide = root.CanCollide,
-				CanQuery = root.CanQuery,
-				CanTouch = root.CanTouch,
-			}
-			root.Transparency = 1
-			root.CanCollide = false
-			root.CanQuery = false
-			root.CanTouch = false
+			self:_hideRoot()
 			self._volume = 0
 		else
 			for _, cut in cuts do
@@ -528,8 +551,9 @@ end
 
 -- Yields until the hit has been applied. `direction` is the shot's travel direction.
 -- `applyAt` (an os.clock() time) holds the result back, e.g. until a shell arrives.
--- Returns nil if there was nothing to hit or the wall was reset meanwhile.
-function Breakable:hit(position: Vector3, direction: Vector3, seed: number, applyAt: number?)
+-- `radius` overrides the `holeRadius` setting for this hit.
+-- Returns nil if there was nothing to hit or the wall was reset or collapsed meanwhile.
+function Breakable:hit(position: Vector3, direction: Vector3, seed: number, applyAt: number?, radius: number?)
 	local generation = self._generation
 	-- one hit at a time: each cuts what the previous one left
 	while self._busy do
@@ -539,7 +563,7 @@ function Breakable:hit(position: Vector3, direction: Vector3, seed: number, appl
 		return nil
 	end
 	self._busy = true
-	local ok, report = pcall(self._apply, self, position, direction.Unit, seed, applyAt)
+	local ok, report = pcall(self._apply, self, position, direction.Unit, seed, applyAt, radius)
 	self._busy = false
 	if not ok then
 		error(report, 0)
@@ -557,6 +581,26 @@ function Breakable:hit(position: Vector3, direction: Vector3, seed: number, appl
 		end
 	end
 	return report
+end
+
+-- Brings the whole wall down without a hit: standing fragments fall as debris and an untouched wall is simply hidden.
+-- A hit still being cut is discarded. Returns the number of fragments thrown. `reset` rebuilds the wall.
+function Breakable:collapse(): number
+	if self.destroyed or self.collapsed then
+		return 0
+	end
+	self._generation += 1
+	self.collapsed = true
+	if not self._original then
+		self:_hideRoot()
+	end
+	local random = Random.new(self.hits)
+	local thrown = #self._standing
+	for _, record in self._standing do
+		self:_throw(record, random:NextUnitVector() * self.settings.spread * 0.2, random:NextUnitVector() * 3)
+	end
+	table.clear(self._standing)
+	return thrown
 end
 
 -- Rebuilds the wall, removing its fragments and debris.
