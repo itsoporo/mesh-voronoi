@@ -370,30 +370,52 @@ return function(lib)
 			end
 		end),
 
-		collapse_blasts_from_the_impact = test({ launchSpeed = 100, spread = 50, lift = 40 }, function(wall, part, Breakable)
+		-- an explosion goes every way, leaning the way it travelled: pieces leave both faces of the wall
+		collapse_blasts_every_way = test({ launchSpeed = 15, spread = 40, lift = 0 }, function(wall, part)
 			local point, direction = face(part, -4, 0)
 			wall:hit(point, direction, 1)
 			local standing = wall:fragments()
 			local impact = face(part, 2, 1)
 			wall:collapse(impact, direction)
-			local speed, up, outward, counted = 0, 0, 0, 0
+			local back, onwards, speed, flat, outward, counted = 0, 0, 0, 0, 0, 0
 			for _, piece in standing do
 				local velocity = piece.AssemblyLinearVelocity
-				assert(velocity:Dot(direction) > 0, `a piece came back at the shooter: {velocity}`)
+				local along = velocity:Dot(direction)
+				back += if along < 0 then 1 else 0
+				onwards += along
 				speed += velocity.Magnitude
-				up += velocity.Y
+				flat = math.max(flat, (velocity * Vector3.new(1, 0, 1)).Magnitude)
 				local away = piece.Position - impact
 				away -= direction * away:Dot(direction)
 				if away.Magnitude > 2 then
 					counted += 1
-					outward += if (velocity - direction * velocity:Dot(direction) - Vector3.yAxis * 40):Dot(away) > 0 then 1 else 0
+					outward += if (velocity - direction * along):Dot(away) > 0 then 1 else 0
 				end
 			end
 			speed /= #standing
-			up /= #standing
-			assert(speed > 60, `mean speed {speed}`)
-			assert(up > 20, `mean lift {up}`)
-			assert(counted > 0 and outward >= counted * 0.9, `{outward} of {counted} fly outward`)
+			assert(back >= #standing * 0.15 and back <= #standing * 0.5, `{back} of {#standing} come back`)
+			assert(onwards > 0, "no lean along the shot")
+			assert(speed > 20 and speed < 65, `mean speed {speed}`)
+			assert(flat <= 70, `a piece crosses {flat} studs a second`)
+			assert(counted > 0 and outward >= counted * 0.8, `{outward} of {counted} move apart`)
+		end),
+
+		blown_out_pieces_scatter = test({ launchSpeed = 15, spread = 40, lift = 0 }, function(wall, part, Breakable)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local back, forward, onwards, fastest = 0, 0, 0, 0
+			for _, piece in workspace.VoronoiDebris:GetChildren() do
+				local velocity = piece.AssemblyLinearVelocity
+				if Breakable.rootOf(piece) == part and velocity.Magnitude > 5 then
+					local along = velocity:Dot(direction)
+					back += if along < 0 then 1 else 0
+					forward += if along > 0 then 1 else 0
+					onwards += along
+					fastest = math.max(fastest, velocity.Magnitude)
+				end
+			end
+			assert(back >= 1 and forward >= 1 and onwards > 0, `{back} back, {forward} onwards`)
+			assert(fastest <= 75, `a piece leaves at {fastest}`)
 		end),
 
 		collapse_without_an_impact_is_gentle = test(nil, function(wall, part)

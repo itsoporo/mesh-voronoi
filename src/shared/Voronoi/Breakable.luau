@@ -35,8 +35,8 @@ local DEFAULTS = {
 	debrisLifetime = 4, -- seconds
 	maxDebris = 120, -- loose pieces alive across all walls
 	rebuildAfter = 20 :: number | boolean, -- seconds without a hit; false never rebuilds
-	launchSpeed = 70, -- studs per second along the shot
-	spread = 25, -- studs per second away from the shot line
+	launchSpeed = 70, -- studs per second along the shot: how far thrown pieces lean that way
+	spread = 25, -- studs per second in every direction away from the impact
 	lift = 0, -- studs per second upwards, added to whatever a hit or a blast throws
 	debrisGravity = 1, -- the share of gravity loose pieces feel; below 1 they fall slower and stay in view longer
 	-- seconds the parts a cut replaces stay visible (no longer solid), so a client that is still loading the new
@@ -394,17 +394,27 @@ function Breakable:_retire(record: any)
 	end)
 end
 
--- The velocity of a piece thrown by an explosion at `impact` travelling along `direction`: mostly onwards, outwards
--- from the impact and up, the nearest pieces fastest.
+-- The velocity of a piece thrown by an explosion at `impact`: every way, leaning along `direction` (the way the
+-- explosion travelled) and upwards. A wall is flat, so besides moving apart in its plane the pieces leave both faces.
 function Breakable:_blast(part: BasePart, impact: Vector3, direction: Vector3, random: Random): Vector3
 	local options = self.settings
+	local root = self.root :: BasePart
+	local _, _, thin = axes(root.Size)
+	local normal = root.CFrame.Rotation:VectorToWorldSpace(UNIT[thin])
+	if normal:Dot(direction) < 0 then
+		normal = -normal
+	end
 	local away = part.Position - impact
-	local sideways = away - direction * away:Dot(direction)
-	local reach = math.max((self.root :: BasePart).Size.Magnitude / 2, 1)
-	local near = math.clamp(1.2 - sideways.Magnitude / reach * 0.7, 0.5, 1.2)
-	local outwards = if sideways.Magnitude > 1e-3 then sideways.Unit else Vector3.zero
-	return direction * options.launchSpeed * near * random:NextNumber(0.8, 1.2)
-		+ outwards * options.spread * random:NextNumber(0.6, 1.2)
+	away -= normal * away:Dot(normal)
+	if away.Magnitude < 0.1 then -- at the very centre: any way across the wall
+		away = normal:Cross(random:NextUnitVector())
+		if away.Magnitude < 1e-3 then
+			away = normal:Cross(if math.abs(normal.Y) < 0.9 then Vector3.yAxis else Vector3.xAxis)
+		end
+	end
+	local burst = (away.Unit + normal * random:NextNumber(-1.2, 1.2) + random:NextUnitVector() * 0.4).Unit
+	return burst * options.spread * random:NextNumber(0.6, 1.2)
+		+ normal * options.launchSpeed * random:NextNumber(0.5, 1.2)
 		+ Vector3.yAxis * options.lift * random:NextNumber(0.6, 1.4)
 end
 
@@ -571,15 +581,7 @@ function Breakable:_apply(
 
 		local function launch(record: any)
 			report.flying += 1
-			local away = record.part.Position - position
-			local sideways = away - direction * away:Dot(direction)
-			local off = math.min(sideways.Magnitude / radius, 1.5)
-			local velocity = direction * options.launchSpeed * math.clamp(1.15 - off * 0.6, 0.35, 1.15)
-			if sideways.Magnitude > 1e-3 then
-				velocity += sideways.Unit * options.spread * off
-			end
-			velocity += Vector3.yAxis * options.lift
-			self:_throw(record, velocity + spin(options.spread * 0.3), spin(14))
+			self:_throw(record, self:_blast(record.part, position, direction, random), spin(14))
 		end
 
 		for _, record in whole do

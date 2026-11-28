@@ -94,7 +94,7 @@ argument to open the hole exactly on impact.
 | `debrisLifetime` | 4 | seconds |
 | `maxDebris` | 120 | loose pieces alive across all walls |
 | `rebuildAfter` | 20 | seconds without a hit; `false` stays broken |
-| `launchSpeed`, `spread` | 70, 25 | debris speed along and away from the shot |
+| `launchSpeed`, `spread` | 70, 25 | thrown pieces burst every way at `spread`, leaning `launchSpeed` along the shot |
 | `debrisCollides` | true | |
 | `fracture` | `workers = 0, frameBudgetMs = 10, simplify = true, meshContent = "opaque"` | Voronoi options for every cut; yours are merged over these |
 
