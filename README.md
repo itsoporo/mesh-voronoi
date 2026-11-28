@@ -52,6 +52,7 @@ local report = wall:hit(hitPosition, shellDirection, seed)   -- yields
 -- report: { flying, dropped, standing, collapsed, remaining, targets, seconds } or nil
 Breakable.rootOf(someFragment)                               -- the wall a fragment came from
 wall:collapse()                                              -- bring it down now
+wall:collapse(hitPosition, shellDirection)                   -- ...blown away from there
 wall:reset()
 ```
 
@@ -82,6 +83,8 @@ argument to open the hole exactly on impact.
 | `holeRadius` | 3 | studs; real holes come out slightly larger. `hit`'s fifth argument overrides it per shot |
 | `attach` | false | weld fragments to the wall part instead of anchoring them |
 | `support` | true | fragments that lose contact with the bottom fall; turn off for parts held from elsewhere |
+| `swapDelay` | 0 | seconds the parts a cut replaces stay visible, no longer solid, while clients load the new meshes |
+| `lift` | 0 | studs per second upwards on everything thrown |
 | `rings` | `false` | custom hole layout: `{ { distance, count, flies? }, ... }`, distances in hole radii |
 | `maxHits` | 8 | the wall collapses on this hit |
 | `collapseBelow` | 0.45 | ...or when this fraction of material is left |

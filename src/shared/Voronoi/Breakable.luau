@@ -37,6 +37,10 @@ local DEFAULTS = {
 	rebuildAfter = 20 :: number | boolean, -- seconds without a hit; false never rebuilds
 	launchSpeed = 70, -- studs per second along the shot
 	spread = 25, -- studs per second away from the shot line
+	lift = 0, -- studs per second upwards, added to whatever a hit or a blast throws
+	-- seconds the parts a cut replaces stay visible (no longer solid), so a client that is still loading the new
+	-- meshes never sees a gap
+	swapDelay = 0,
 	debrisCollides = true,
 	rings = false :: any, -- { Ring } to lay out each hole's sites differently; false for the standard 25
 	-- true welds the fragments to the wall part instead of anchoring them, for walls that are part of something that
@@ -204,6 +208,7 @@ function Breakable.new(root: BasePart, settings: { [string]: any }?)
 		destroyed = false,
 		_standing = {} :: { any },
 		_original = nil :: any, -- the root's properties while it is hidden
+		_retiring = {} :: { any }, -- replaced pieces still visible for `swapDelay`
 		_volume = 0,
 		_generation = 0,
 		_hitNumber = 0,
@@ -333,19 +338,63 @@ function Breakable:_throw(record: any, velocity: Vector3, spin: Vector3)
 	end
 end
 
--- The wall part stays as the anchor for its fragments, unseen and untouchable, until `reset`.
-function Breakable:_hideRoot()
+-- The wall part stays as the anchor for its fragments, untouchable at once and unseen after `delay`, until `reset`.
+function Breakable:_hideRoot(delay: number?)
 	local root = self.root :: BasePart
-	self._original = {
+	local original = {
 		Transparency = root.Transparency,
 		CanCollide = root.CanCollide,
 		CanQuery = root.CanQuery,
 		CanTouch = root.CanTouch,
 	}
-	root.Transparency = 1
+	self._original = original
 	root.CanCollide = false
 	root.CanQuery = false
 	root.CanTouch = false
+	if delay and delay > 0 then
+		task.delay(delay, function()
+			if self._original == original then -- not rebuilt in the meantime
+				root.Transparency = 1
+			end
+		end)
+	else
+		root.Transparency = 1
+	end
+end
+
+-- Takes a replaced piece out of play at once and out of sight after `swapDelay`.
+function Breakable:_retire(record: any)
+	local delay = self.settings.swapDelay
+	if delay <= 0 then
+		record.release()
+		return
+	end
+	local part = record.part :: BasePart
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	table.insert(self._retiring, record)
+	task.delay(delay, function()
+		local index = table.find(self._retiring, record)
+		if index then
+			table.remove(self._retiring, index)
+			record.release()
+		end
+	end)
+end
+
+-- The velocity of a piece thrown by an explosion at `impact` travelling along `direction`: mostly onwards, outwards
+-- from the impact and up, the nearest pieces fastest.
+function Breakable:_blast(part: BasePart, impact: Vector3, direction: Vector3, random: Random): Vector3
+	local options = self.settings
+	local away = part.Position - impact
+	local sideways = away - direction * away:Dot(direction)
+	local reach = math.max((self.root :: BasePart).Size.Magnitude / 2, 1)
+	local near = math.clamp(1.2 - sideways.Magnitude / reach * 0.7, 0.5, 1.2)
+	local outwards = if sideways.Magnitude > 1e-3 then sideways.Unit else Vector3.zero
+	return direction * options.launchSpeed * near * random:NextNumber(0.8, 1.2)
+		+ outwards * options.spread * random:NextNumber(0.6, 1.2)
+		+ Vector3.yAxis * options.lift * random:NextNumber(0.6, 1.4)
 end
 
 -- Is there anything left to hit along the shot at this point?
@@ -488,14 +537,14 @@ function Breakable:_apply(
 			frames[i] = cut.target.part.CFrame
 		end
 		if first then
-			self:_hideRoot()
+			self:_hideRoot(options.swapDelay)
 			self._volume = 0
 		else
 			for _, cut in cuts do
 				local index = table.find(self._standing, cut.target)
 				if index then
 					table.remove(self._standing, index)
-					cut.target.release()
+					self:_retire(cut.target)
 				end
 			end
 		end
@@ -518,6 +567,7 @@ function Breakable:_apply(
 			if sideways.Magnitude > 1e-3 then
 				velocity += sideways.Unit * options.spread * off
 			end
+			velocity += Vector3.yAxis * options.lift
 			self:_throw(record, velocity + spin(options.spread * 0.3), spin(14))
 		end
 
@@ -586,9 +636,7 @@ function Breakable:_apply(
 			self.collapsed = true
 			report.collapsed = true
 			for _, record in self._standing do
-				local away = record.part.Position - position
-				local push = if away.Magnitude > 1e-3 then away.Unit * options.spread * 0.2 else Vector3.zero
-				self:_throw(record, direction * options.launchSpeed * 0.15 + push, spin(3))
+				self:_throw(record, self:_blast(record.part, position, direction, random), spin(14))
 			end
 			table.clear(self._standing)
 		end
@@ -655,9 +703,10 @@ function Breakable:hit(
 	return report
 end
 
--- Brings the whole wall down without a hit: standing fragments fall as debris and an untouched wall is simply hidden.
--- A hit still being cut is discarded. Returns the number of fragments thrown. `reset` rebuilds the wall.
-function Breakable:collapse(): number
+-- Brings the whole wall down. Given where an explosion hit it and which way that travelled, the standing fragments are
+-- blown away from there; without, they fall where they are. An untouched wall is simply hidden. A hit still being cut
+-- is discarded. Returns the number of fragments thrown. `reset` rebuilds the wall.
+function Breakable:collapse(impact: Vector3?, direction: Vector3?): number
 	if self.destroyed or self.collapsed then
 		return 0
 	end
@@ -669,7 +718,12 @@ function Breakable:collapse(): number
 	local random = Random.new(self.hits)
 	local thrown = #self._standing
 	for _, record in self._standing do
-		self:_throw(record, random:NextUnitVector() * self.settings.spread * 0.2, random:NextUnitVector() * 3)
+		if impact and direction then
+			local velocity = self:_blast(record.part, impact, direction.Unit, random)
+			self:_throw(record, velocity, random:NextUnitVector() * 14)
+		else
+			self:_throw(record, random:NextUnitVector() * self.settings.spread * 0.2, random:NextUnitVector() * 3)
+		end
 	end
 	table.clear(self._standing)
 	return thrown
@@ -682,6 +736,10 @@ function Breakable:reset()
 		record.release()
 	end
 	table.clear(self._standing)
+	for _, record in self._retiring do
+		record.release()
+	end
+	table.clear(self._retiring)
 	for i = #debris, 1, -1 do
 		if debris[i].owner == self then
 			removeDebris(debris[i])

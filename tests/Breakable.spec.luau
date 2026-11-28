@@ -293,6 +293,132 @@ return function(lib)
 			assert(report.dropped == 0 and above > 0, `{report.dropped} dropped, {above} above the hole`)
 		end,
 
+		-- a client needs a moment to show new meshes: what they replace stays visible that long, but is no longer solid
+		swap_delay_keeps_the_wall_visible = test({ swapDelay = 0.4 }, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			assert(#wall:fragments() > 0)
+			assert(part.Transparency == 0, "the wall vanished at once")
+			assert(not part.CanQuery and not part.CanCollide and not part.CanTouch, "the old wall is still solid")
+			task.wait(0.6)
+			assert(part.Transparency == 1, "the old wall never went")
+		end),
+
+		swap_delay_keeps_replaced_pieces_visible = test({ swapDelay = 0.4, attach = true }, function(wall, part)
+			local point, direction = face(part, -4, 0)
+			wall:hit(point, direction, 1)
+			task.wait(0.6)
+			local before = wall:fragments()
+			wall:hit(face(part, 3, 0), direction, 2)
+			local standing = wall:fragments()
+			local lingering = {}
+			for _, piece in before do
+				if not table.find(standing, piece) and piece.Parent and piece.Parent.Name ~= "VoronoiDebris" then
+					table.insert(lingering, piece)
+				end
+			end
+			assert(#lingering > 0, "the replaced pieces vanished at once")
+			for _, piece in lingering do
+				assert(piece.Transparency == 0 and not piece.CanQuery and not piece.CanCollide, "a replaced piece is still solid")
+				assert(piece:FindFirstChildOfClass("WeldConstraint"), "a replaced piece came loose")
+			end
+			task.wait(0.6)
+			for _, piece in lingering do
+				assert(piece.Parent == nil, "a replaced piece was left behind")
+			end
+		end),
+
+		reset_during_the_swap = test({ swapDelay = 0.4 }, function(wall, part)
+			local point, direction = face(part, -4, 0)
+			wall:hit(point, direction, 1)
+			task.wait(0.6)
+			local before = wall:fragments()
+			wall:hit(face(part, 3, 0), direction, 2)
+			wall:reset()
+			for _, piece in before do
+				assert(piece.Parent == nil, "a piece survived the reset")
+			end
+			assert(part.Transparency == 0 and part.CanQuery)
+			wall:hit(point, direction, 3)
+			wall:reset() -- while the whole wall is still waiting to be hidden
+			task.wait(0.6)
+			assert(part.Transparency == 0 and part.CanQuery and part.CanCollide, "the wall was hidden after its reset")
+		end),
+
+		destroy_during_the_swap = test({ swapDelay = 0.4 }, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local pieces = wall:fragments()
+			wall:destroy()
+			task.wait(0.6)
+			assert(part.Transparency == 0 and part.CanQuery)
+			for _, piece in pieces do
+				assert(piece.Parent == nil)
+			end
+		end),
+
+		collapse_during_the_swap = test({ swapDelay = 0.4, debrisLifetime = 0.1 }, function(wall, part)
+			local point, direction = face(part, -4, 0)
+			wall:hit(point, direction, 1)
+			wall:hit(face(part, 3, 0), direction, 2)
+			wall:collapse()
+			task.wait(0.8)
+			assert(part.Transparency == 1, "the collapsed wall stayed visible")
+			local folder = workspace:FindFirstChild("VoronoiWalls")
+			for _, piece in if folder then folder:GetChildren() else {} do
+				assert(piece:FindFirstChild("BreakableRoot").Value ~= part, "a piece was left standing")
+			end
+		end),
+
+		collapse_blasts_from_the_impact = test({ launchSpeed = 100, spread = 50, lift = 40 }, function(wall, part, Breakable)
+			local point, direction = face(part, -4, 0)
+			wall:hit(point, direction, 1)
+			local standing = wall:fragments()
+			local impact = face(part, 2, 1)
+			wall:collapse(impact, direction)
+			local speed, up, outward, counted = 0, 0, 0, 0
+			for _, piece in standing do
+				local velocity = piece.AssemblyLinearVelocity
+				assert(velocity:Dot(direction) > 0, `a piece came back at the shooter: {velocity}`)
+				speed += velocity.Magnitude
+				up += velocity.Y
+				local away = piece.Position - impact
+				away -= direction * away:Dot(direction)
+				if away.Magnitude > 2 then
+					counted += 1
+					outward += if (velocity - direction * velocity:Dot(direction) - Vector3.yAxis * 40):Dot(away) > 0 then 1 else 0
+				end
+			end
+			speed /= #standing
+			up /= #standing
+			assert(speed > 60, `mean speed {speed}`)
+			assert(up > 20, `mean lift {up}`)
+			assert(counted > 0 and outward >= counted * 0.9, `{outward} of {counted} fly outward`)
+		end),
+
+		collapse_without_an_impact_is_gentle = test(nil, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local standing = wall:fragments()
+			wall:collapse()
+			for _, piece in standing do
+				assert(piece.AssemblyLinearVelocity.Magnitude < 10, `{piece.AssemblyLinearVelocity.Magnitude}`)
+			end
+		end),
+
+		lift_throws_blown_out_pieces_up = test({ lift = 60 }, function(wall, part, Breakable)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local up, count = 0, 0
+			for _, piece in workspace.VoronoiDebris:GetChildren() do
+				if Breakable.rootOf(piece) == part and piece.AssemblyLinearVelocity.Magnitude > 20 then
+					up += piece.AssemblyLinearVelocity.Y
+					count += 1
+				end
+			end
+			assert(count > 0 and up / count > 35, `{count} pieces, mean lift {up / math.max(count, 1)}`)
+		end),
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()
