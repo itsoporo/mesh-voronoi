@@ -37,7 +37,13 @@ local DEFAULTS = {
 	launchSpeed = 70, -- studs per second along the shot
 	spread = 25, -- studs per second away from the shot line
 	debrisCollides = true,
-	fracture = {} :: { [string]: any }, -- Voronoi options used for every cut
+	-- Voronoi options for every cut; yours are merged over these
+	fracture = {
+		workers = 0, -- wall fragments are tiny: workers cost more than they save
+		frameBudgetMs = 10,
+		simplify = true, -- far fewer triangles per fragment
+		meshContent = "opaque", -- fragments hold no editable memory, however many pile up
+	} :: { [string]: any },
 }
 
 local Breakable = {}
@@ -136,11 +142,18 @@ end
 
 function Breakable.new(root: BasePart, settings: { [string]: any }?)
 	local options = table.clone(DEFAULTS)
+	options.fracture = table.clone(DEFAULTS.fracture)
 	for key, value in settings or {} do
 		if DEFAULTS[key] == nil then
 			error(`Breakable: unknown setting "{key}"`, 2)
 		end
-		(options :: any)[key] = value
+		if key == "fracture" then
+			for option, chosen in value do
+				options.fracture[option] = chosen
+			end
+		else
+			(options :: any)[key] = value
+		end
 	end
 	local self = setmetatable({
 		root = root,
@@ -154,8 +167,19 @@ function Breakable.new(root: BasePart, settings: { [string]: any }?)
 		_generation = 0,
 		_hitNumber = 0,
 		_busy = false,
+		_watching = {} :: { RBXScriptConnection },
 	}, Breakable)
 	registry[root] = self
+	-- a wall that is destroyed, stored away or streamed out takes its rubble with it
+	local function gone()
+		self:destroy()
+	end
+	table.insert(self._watching, root.Destroying:Connect(gone))
+	table.insert(self._watching, root.AncestryChanged:Connect(function()
+		if not root:IsDescendantOf(workspace) then
+			gone()
+		end
+	end))
 	return self
 end
 
@@ -272,6 +296,13 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 	local options = self.settings
 	local root = self.root :: BasePart
 	local generation = self._generation
+	local inWorld = root:IsDescendantOf(workspace)
+	-- forget fragments that something else has deleted
+	for i = #self._standing, 1, -1 do
+		if not self._standing[i].part.Parent then
+			table.remove(self._standing, i).release()
+		end
+	end
 	if not self:_solidAt(position, direction) then
 		return nil
 	end
@@ -352,7 +383,8 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 			task.wait()
 		end
 	end
-	if failure or generation ~= self._generation then
+	local removed = inWorld and not root:IsDescendantOf(workspace)
+	if failure or removed or generation ~= self._generation then
 		for _, cut in cuts do
 			cut.result:destroy()
 		end
@@ -362,115 +394,136 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 		return nil
 	end
 
-	local random = Random.new(seed)
-	local first = self.hits == 0
-	if first then
-		self._original = {
-			Transparency = root.Transparency,
-			CanCollide = root.CanCollide,
-			CanQuery = root.CanQuery,
-			CanTouch = root.CanTouch,
-		}
-		root.Transparency = 1
-		root.CanCollide = false
-		root.CanQuery = false
-		root.CanTouch = false
-		self._volume = 0
-	else
-		for _, cut in cuts do
-			local index = table.find(self._standing, cut.target)
+	-- Everything from here changes the wall. It does not yield, and if any of it fails
+	-- the wall is rebuilt rather than left half changed.
+	local function commit()
+		local random = Random.new(seed)
+		local first = self.hits == 0
+		if first then
+			self._original = {
+				Transparency = root.Transparency,
+				CanCollide = root.CanCollide,
+				CanQuery = root.CanQuery,
+				CanTouch = root.CanTouch,
+			}
+			root.Transparency = 1
+			root.CanCollide = false
+			root.CanQuery = false
+			root.CanTouch = false
+			self._volume = 0
+		else
+			for _, cut in cuts do
+				local index = table.find(self._standing, cut.target)
+				if index then
+					table.remove(self._standing, index)
+					cut.target.release()
+				end
+			end
+		end
+
+		local report = { targets = #targets + #whole, flying = 0, dropped = 0, standing = 0, collapsed = false, remaining = 0, seconds = seconds }
+		local function spin(scale: number): Vector3
+			return random:NextUnitVector() * scale
+		end
+		local function drop(record: any)
+			report.dropped += 1
+			self:_throw(record, Vector3.zero, spin(2))
+		end
+
+		local function launch(record: any)
+			report.flying += 1
+			local away = record.part.Position - position
+			local sideways = away - direction * away:Dot(direction)
+			local off = math.min(sideways.Magnitude / radius, 1.5)
+			local velocity = direction * options.launchSpeed * math.clamp(1.15 - off * 0.6, 0.35, 1.15)
+			if sideways.Magnitude > 1e-3 then
+				velocity += sideways.Unit * options.spread * off
+			end
+			self:_throw(record, velocity + spin(options.spread * 0.3), spin(14))
+		end
+
+		for _, record in whole do
+			local index = table.find(self._standing, record)
 			if index then
 				table.remove(self._standing, index)
-				cut.target.release()
-			end
-		end
-	end
-
-	local report = { targets = #targets + #whole, flying = 0, dropped = 0, standing = 0, collapsed = false, remaining = 0, seconds = seconds }
-	local function spin(scale: number): Vector3
-		return random:NextUnitVector() * scale
-	end
-	local function drop(record: any)
-		report.dropped += 1
-		self:_throw(record, Vector3.zero, spin(2))
-	end
-
-	local function launch(record: any)
-		report.flying += 1
-		local away = record.part.Position - position
-		local sideways = away - direction * away:Dot(direction)
-		local off = math.min(sideways.Magnitude / radius, 1.5)
-		local velocity = direction * options.launchSpeed * math.clamp(1.15 - off * 0.6, 0.35, 1.15)
-		if sideways.Magnitude > 1e-3 then
-			velocity += sideways.Unit * options.spread * off
-		end
-		self:_throw(record, velocity + spin(options.spread * 0.3), spin(14))
-	end
-
-	for _, record in whole do
-		local index = table.find(self._standing, record)
-		if index then
-			table.remove(self._standing, index)
-			launch(record)
-		end
-	end
-
-	local standingParts = folder(FRAGMENT_FOLDER)
-	for _, cut in cuts do
-		for _, piece in cut.result.pieces do
-			if first then
-				self._volume += piece.volume
-			end
-			local record = { part = piece.part, mesh = piece.mesh, volume = piece.volume, release = piece.destroy }
-			local link = Instance.new("ObjectValue")
-			link.Name = ROOT_LINK
-			link.Value = root
-			link.Parent = piece.part
-			if flies[piece.siteIndex] then
 				launch(record)
-			elseif piece.volume < options.minFragmentVolume then
-				drop(record)
-			else
-				piece.part.Anchored = true
-				piece.part.Parent = standingParts
-				table.insert(self._standing, record)
 			end
 		end
-	end
 
-	-- anything no longer connected to the ground falls (walls only, not floors)
-	if thin ~= 2 then
-		local boxes = {}
-		for i, record in self._standing do
-			boxes[i] = boxIn(root.CFrame, record.part)
-		end
-		local held = Breakable.supported(boxes, -root.Size.Y / 2)
-		for i = #self._standing, 1, -1 do
-			if not held[i] then
-				drop(table.remove(self._standing, i))
+		local standingParts = folder(FRAGMENT_FOLDER)
+		for _, cut in cuts do
+			for _, piece in cut.result.pieces do
+				if first then
+					self._volume += piece.volume
+				end
+				local record = { part = piece.part, mesh = piece.mesh, volume = piece.volume, release = piece.destroy }
+				local link = Instance.new("ObjectValue")
+				link.Name = ROOT_LINK
+				link.Value = root
+				link.Parent = piece.part
+				if flies[piece.siteIndex] then
+					launch(record)
+				elseif piece.volume < options.minFragmentVolume then
+					drop(record)
+				else
+					piece.part.Anchored = true
+					piece.part.Parent = standingParts
+					table.insert(self._standing, record)
+				end
 			end
 		end
-	end
 
-	self.hits += 1
-	local left = 0
-	for _, record in self._standing do
-		left += record.volume
-	end
-	report.remaining = if self._volume > 0 then left / self._volume else 0
+		-- anything no longer connected to the ground falls (walls only, not floors)
+		if thin ~= 2 then
+			local boxes = {}
+			for i, record in self._standing do
+				boxes[i] = boxIn(root.CFrame, record.part)
+			end
+			local held = Breakable.supported(boxes, -root.Size.Y / 2)
+			for i = #self._standing, 1, -1 do
+				if not held[i] then
+					drop(table.remove(self._standing, i))
+				end
+			end
+		end
 
-	if self.hits >= options.maxHits or report.remaining <= options.collapseBelow or #self._standing > options.maxFragments then
-		self.collapsed = true
-		report.collapsed = true
+		self.hits += 1
+		local left = 0
 		for _, record in self._standing do
-			local away = record.part.Position - position
-			local push = if away.Magnitude > 1e-3 then away.Unit * options.spread * 0.2 else Vector3.zero
-			self:_throw(record, direction * options.launchSpeed * 0.15 + push, spin(3))
+			left += record.volume
 		end
-		table.clear(self._standing)
+		report.remaining = if self._volume > 0 then left / self._volume else 0
+
+		if self.hits >= options.maxHits or report.remaining <= options.collapseBelow or #self._standing > options.maxFragments then
+			self.collapsed = true
+			report.collapsed = true
+			for _, record in self._standing do
+				local away = record.part.Position - position
+				local push = if away.Magnitude > 1e-3 then away.Unit * options.spread * 0.2 else Vector3.zero
+				self:_throw(record, direction * options.launchSpeed * 0.15 + push, spin(3))
+			end
+			table.clear(self._standing)
+		end
+		report.standing = #self._standing
+		return report
 	end
-	report.standing = #self._standing
-	return report
+
+	local committed, result = pcall(commit)
+	if not committed then
+		for _, list in { targets, whole } do
+			for _, record in list do
+				if record.release then
+					record.release()
+				end
+			end
+		end
+		for _, cut in cuts do
+			cut.result:destroy()
+		end
+		self:reset()
+		error(result, 0)
+	end
+	return result
 end
 
 -- Yields until the hit has been applied. `direction` is the shot's travel direction.
@@ -529,9 +582,18 @@ function Breakable:reset()
 end
 
 function Breakable:destroy()
-	self:reset()
+	if self.destroyed then
+		return
+	end
 	self.destroyed = true
-	registry[self.root] = nil
+	for _, connection in self._watching do
+		connection:Disconnect()
+	end
+	table.clear(self._watching)
+	self:reset()
+	if registry[self.root] == self then
+		registry[self.root] = nil
+	end
 end
 
 return Breakable

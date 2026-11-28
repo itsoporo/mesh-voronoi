@@ -51,6 +51,11 @@ local COPIED_PROPERTIES = {
 
 local PartBuilder = {}
 
+-- The one place resizable meshes come from.
+function PartBuilder.createMesh(): EditableMesh?
+	return AssetService:CreateEditableMesh()
+end
+
 local function copyProperties(source: BasePart, part: MeshPart)
 	for _, property in COPIED_PROPERTIES do
 		-- some are not writable from every context
@@ -184,18 +189,22 @@ function PartBuilder.build(source: BasePart, cells: { Cell }, config: Config.Con
 	-- A resizable mesh to fill, waiting while other builds are using the budget.
 	local function acquire(): EditableMesh
 		while true do
-			while dynamicAlive >= limit do
+			while dynamicAlive >= limit and not failure do
 				task.wait()
 			end
 			if failure then
 				error(failure, 0)
 			end
 			dynamicAlive += 1
-			local dynamic = AssetService:CreateEditableMesh()
-			if dynamic then
+			-- the slot must be returned even if creation raises, or later builds wait forever
+			local ok, dynamic = pcall(PartBuilder.createMesh)
+			if ok and dynamic then
 				return dynamic
 			end
 			dynamicAlive -= 1
+			if not ok then
+				error(dynamic, 0)
+			end
 			if dynamicAlive == 0 then
 				error("out of editable mesh memory", 0)
 			end

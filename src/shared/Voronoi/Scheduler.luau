@@ -25,9 +25,10 @@ local nextJobId = 0
 
 local Scheduler = {}
 
-local function destroyPool(workers: number)
+-- With `only`, a newer pool that has since replaced it is left alone.
+local function destroyPool(workers: number, only: Pool?)
 	local pool = pools[workers]
-	if pool then
+	if pool and (only == nil or pool == only) then
 		pools[workers] = nil
 		pool.folder:Destroy()
 	end
@@ -71,8 +72,11 @@ local function getPool(workers: number): Pool
 	local started = os.clock()
 	for _, actor in ready.actors do
 		while not actor:GetAttribute("Ready") do
+			if not ready.folder.Parent then
+				error("Voronoi: workers were shut down while starting", 0)
+			end
 			if os.clock() - started > TIMEOUT then
-				destroyPool(workers)
+				destroyPool(workers, ready)
 				error("Voronoi: workers did not respond while starting", 0)
 			end
 			task.wait()
@@ -156,15 +160,22 @@ local function runParallel(source: MeshData, sites: { Vector3 }, config: Config.
 			perFrame = wave * math.max(1, math.floor(config.frameBudgetMs / average))
 		end
 		for _ = 1, math.min(perFrame, #sites - sent) do
+			if not pool.folder.Parent then
+				break
+			end
 			sent += 1
 			local actor = pool.actors[pool.nextActor]
 			pool.nextActor = pool.nextActor % #pool.actors + 1
 			actor:SendMessage(TOPIC, jobId, job, sent, reply)
 		end
 		task.wait()
-		if finished < #sites and os.clock() - lastReply > TIMEOUT then
-			destroyPool(workers)
-			failure = "Voronoi: workers did not respond in time"
+		if finished < #sites then
+			if not pool.folder.Parent then
+				failure = failure or "Voronoi: workers did not respond; they were shut down mid-job"
+			elseif os.clock() - lastReply > TIMEOUT then
+				destroyPool(workers, pool)
+				failure = "Voronoi: workers did not respond in time"
+			end
 		end
 	end
 	connection:Disconnect()

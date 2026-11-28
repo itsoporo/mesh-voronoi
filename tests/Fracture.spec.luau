@@ -311,6 +311,50 @@ return function(lib)
 			plain:destroy()
 			simple:destroy()
 		end,
+		-- a mesh that cannot be created must fail the build, not wedge every later one
+		creation_error_does_not_wedge = function()
+			local RunService = game:GetService("RunService")
+			if not (RunService:IsRunning() and RunService:IsClient()) then
+				return -- only clients limit how many builds run at once
+			end
+			local Voronoi = load()
+			local PartBuilder = require(lib.PartBuilder)
+			local block = Instance.new("Part")
+			block.Size = Vector3.new(8, 6, 2)
+			local sites = Voronoi.Points.generate(block, { count = 12 })
+			local real = PartBuilder.createMesh
+			-- runs a build in the background so a hang shows up as a failure, not a stall
+			local function attempt(): (boolean, boolean)
+				local finished, ok = false, false
+				task.spawn(function()
+					local succeeded, result = pcall(Voronoi.fracture, block, sites, { workers = 0 })
+					ok, finished = succeeded, true
+					if succeeded then
+						result:destroy()
+					end
+				end)
+				local started = os.clock()
+				while not finished and os.clock() - started < 3 do
+					task.wait()
+				end
+				return finished, ok
+			end
+			PartBuilder.createMesh = function()
+				error("EditableMesh is not accessible")
+			end
+			local failedCleanly = true
+			for _ = 1, 6 do
+				local finished, ok = attempt()
+				failedCleanly = finished and not ok
+				if not failedCleanly then
+					break
+				end
+			end
+			PartBuilder.createMesh = real
+			assert(failedCleanly, "a failing build hung or swallowed its error")
+			local finished, ok = attempt()
+			assert(finished and ok, "later builds are wedged")
+		end,
 		split_islands = function()
 			local Voronoi, MeshData = load()
 			-- two separate boxes read as one cell become two pieces

@@ -154,22 +154,30 @@ return function(lib)
 			assert(smallest >= 0.4, `a fragment of {smallest} studs³ was left`)
 		end),
 
-		-- a hit that touches many fragments cuts them side by side, not a frame apiece
-		many_fragments_cut_together = test({ fracture = { workers = 0, frameBudgetMs = 1000 } }, function(wall, part)
+		-- a hit that touches many fragments cuts them side by side, not one after another
+		many_fragments_cut_together = test(nil, function(wall, part)
 			for i, x in { -6, 6 } do
 				local point, direction = face(part, x, 0)
 				wall:hit(point, direction, i)
 			end
-			local frames = 0
-			local connection = game:GetService("RunService").Heartbeat:Connect(function()
-				frames += 1
-			end)
+			local Voronoi = require(lib)
+			local real = Voronoi.fracture
+			local active, peak, calls = 0, 0, 0
+			Voronoi.fracture = function(...)
+				active += 1
+				calls += 1
+				peak = math.max(peak, active)
+				local result = real(...)
+				active -= 1
+				return result
+			end
 			wall.settings.holeRadius = 5 -- reach the rubble around both holes
 			local point, direction = face(part, 0, -4)
-			local report = wall:hit(point, direction, 3)
-			connection:Disconnect()
-			assert(report and report.targets >= 5, `only {report and report.targets} fragments touched`)
-			assert(frames <= 3, `{frames} frames for {report.targets} fragments`)
+			local ok, report = pcall(wall.hit, wall, point, direction, 3)
+			Voronoi.fracture = real
+			assert(ok, tostring(report))
+			assert(calls >= 3, `only {calls} fragments cut`)
+			assert(peak == calls, `at most {peak} of {calls} cuts ran together`)
 		end),
 
 		-- repeated damage must not pile up fragments or triangles
@@ -185,6 +193,98 @@ return function(lib)
 			end
 			assert(#standing > 0 and #standing <= 50, `{#standing} fragments standing`)
 			assert(triangles / #standing <= 60, `{triangles / #standing} triangles per fragment`)
+		end),
+
+		-- the settings that keep walls light are the library's own defaults
+		light_defaults = function()
+			local Breakable = load()
+			local part = newWall()
+			local wall = Breakable.new(part)
+			local fracture = wall.settings.fracture
+			assert(fracture.simplify == true and fracture.meshContent == "opaque", "heavy defaults")
+			assert(fracture.workers == 0 and fracture.frameBudgetMs == 10)
+			wall:destroy()
+			local custom = Breakable.new(part, { fracture = { capColor = Color3.new(1, 0, 0) } })
+			assert(custom.settings.fracture.simplify == true, "an override replaced every default")
+			assert(custom.settings.fracture.capColor == Color3.new(1, 0, 0))
+			custom:destroy()
+			local again = Breakable.new(part)
+			assert(again.settings.fracture.capColor == nil, "defaults were mutated")
+			again:destroy()
+			part:Destroy()
+		end,
+
+		destroying_the_part_cleans_up = test(nil, function(wall, part, Breakable)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local fragments = wall:fragments()
+			assert(#fragments > 0)
+			part:Destroy()
+			task.wait()
+			for _, fragment in fragments do
+				assert(fragment.Parent == nil, "fragment left standing")
+			end
+			assert(wall.destroyed and wall:debrisCount() == 0 and Breakable.debrisCount() == 0)
+		end),
+
+		removing_the_part_cleans_up = test(nil, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local fragments = wall:fragments()
+			part.Parent = nil
+			task.wait()
+			for _, fragment in fragments do
+				assert(fragment.Parent == nil, "fragment left standing")
+			end
+			assert(wall.destroyed and wall:debrisCount() == 0)
+		end),
+
+		part_destroyed_during_a_hit = test(nil, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			local done, report = false, nil
+			task.spawn(function()
+				report = wall:hit(point, direction, 1, os.clock() + 0.5)
+				done = true
+			end)
+			part:Destroy()
+			local started = os.clock()
+			while not done and os.clock() - started < 10 do
+				task.wait()
+			end
+			assert(done and report == nil and #wall:fragments() == 0 and wall:debrisCount() == 0)
+		end),
+
+		-- other code may delete a fragment; the next hit carries on without it
+		deleted_fragment_is_skipped = test(nil, function(wall, part)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			local far = part.CFrame:PointToWorldSpace(Vector3.new(12, 0, 0))
+			local victim, distance = nil, -1
+			for _, fragment in wall:fragments() do
+				local away = (fragment.Position - far).Magnitude
+				if away > distance then
+					victim, distance = fragment, away
+				end
+			end
+			victim:Destroy()
+			wall.settings.holeRadius = 40
+			local second = face(part, 12, 0)
+			local ok, report = pcall(wall.hit, wall, second, direction, 2)
+			assert(ok, tostring(report))
+			assert(report, "hit did nothing")
+		end),
+
+		-- an error partway through a hit leaves a whole wall, not half of one
+		error_while_applying_resets = test(nil, function(wall, part, Breakable)
+			local point, direction = face(part, -8, 0)
+			wall:hit(point, direction, 1)
+			wall.settings.launchSpeed = "fast"
+			local second = face(part, 8, 0)
+			assert(not pcall(wall.hit, wall, second, direction, 2))
+			assert(part.Transparency == 0 and part.CanCollide, "wall left half applied")
+			assert(wall.hits == 0 and #wall:fragments() == 0 and Breakable.debrisCount() == 0)
+			wall.settings.launchSpeed = 70
+			assert(wall:hit(second, direction, 3), "cannot be hit afterwards")
 		end),
 
 		collapses_after_max_hits = test({ maxHits = 3 }, function(wall, part)

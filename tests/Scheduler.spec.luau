@@ -143,6 +143,44 @@ return function(lib)
 			assert(os.clock() - started < 11.5, "took too long to give up")
 			same(run(source, sites, 0), run(source, sites, 2), sites)
 		end,
+		-- a job whose workers are gone fails promptly and leaves newer workers alone
+		lost_pool_leaves_newer_pool = function()
+			local _, MeshData = load()
+			local source = Fixtures.tunnel(MeshData)
+			local sites = randomSites(11, 8, Vector3.new(2, 2, 1))
+			run(source, sites, 5)
+			local old: Instance? = nil
+			for _, folder in pools() do
+				if #folder:GetChildren() == 5 then
+					old = folder
+				end
+			end
+			assert(old, "no pool of 5 workers")
+			for _, descendant in (old :: Instance):GetDescendants() do
+				if descendant:IsA("BaseScript") then
+					descendant:Destroy()
+				end
+			end
+			local done, ok = false, true
+			task.spawn(function()
+				ok = pcall(run, source, sites, 5)
+				done = true
+			end)
+			task.wait(0.3);
+			(old :: Instance):Destroy() -- as another job's timeout would
+			local lost = os.clock()
+			same(run(source, sites, 0), run(source, sites, 5), sites)
+			while not done and os.clock() - lost < 12 do
+				task.wait()
+			end
+			assert(done and not ok, "the stranded job did not fail")
+			assert(os.clock() - lost < 3, `stranded job took {os.clock() - lost} s to give up`)
+			local alive = false
+			for _, folder in pools() do
+				alive = alive or #folder:GetChildren() == 5
+			end
+			assert(alive, "the newer pool was destroyed")
+		end,
 		zz_no_leftovers = function()
 			local Scheduler, MeshData = load()
 			run(Fixtures.tunnel(MeshData), randomSites(8, 4, Vector3.one), 3)

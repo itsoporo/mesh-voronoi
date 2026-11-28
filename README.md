@@ -61,6 +61,10 @@ the whole wall collapses after too much damage. `hit` returns `nil` when the sho
 through an existing hole or the wall has collapsed. Walls must stand upright (support
 is measured along the part's local Y).
 
+Destroying the wall part, or taking it out of `workspace`, removes its fragments and
+debris too; call `Breakable.get` again for a new part. If an error interrupts a hit,
+the wall is rebuilt rather than left half broken.
+
 For a tank game, call `hit` on the **server** so every player agrees on where the
 holes are. Pass the shell's arrival time (`os.clock() + flightTime`) as the fourth
 argument to open the hole exactly on impact.
@@ -77,7 +81,7 @@ argument to open the hole exactly on impact.
 | `rebuildAfter` | 20 | seconds without a hit; `false` stays broken |
 | `launchSpeed`, `spread` | 70, 25 | debris speed along and away from the shot |
 | `debrisCollides` | true | |
-| `fracture` | `{}` | Voronoi options for every cut |
+| `fracture` | `workers = 0, frameBudgetMs = 10, simplify = true, meshContent = "opaque"` | Voronoi options for every cut; yours are merged over these |
 
 The demo's values are in `src/demo/shared/WallSettings.luau`.
 
@@ -123,9 +127,11 @@ frame budget was shared between concurrent work:
 Enforcing the shared budget made building slower: the same 32-site case measured
 about 270 to 450 ms at a 4 ms budget.
 
-**The click demo** clusters sites around the click, which costs about twice as much:
-about 0.4 s for one Suzanne at a 16 ms budget with a worst frame near 90 ms, and
-about 1.2 s with a worst frame near 200 ms when four break at once.
+**The click demo** clusters sites around the click, which costs about twice as much
+as spreading them evenly. One real click measured 0.19 s to fracture one Suzanne
+(258 ms from click to broken, worst frame 51 ms) in client mode and 0.30 s in server
+mode; scripted runs ranged from 0.3 to 0.4 s. Four breaking at once took 0.9 to
+1.3 s, with worst frames of 120 to 210 ms.
 
 **Walls** (client, 43 shots until collapse): median 204 ms per hit with opaque pieces
 (worst frame 36 ms), 127 ms with `"auto"` (worst frame 25 ms). Server mode reached

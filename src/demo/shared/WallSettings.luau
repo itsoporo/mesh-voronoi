@@ -15,14 +15,7 @@ return {
 		rebuildAfter = 20, -- seconds without a hit; false to stay broken
 		launchSpeed = 70,
 		spread = 25,
-		fracture = {
-			capColor = Color3.fromRGB(150, 140, 130),
-			-- wall fragments are tiny: cutting them here beats handing them to workers,
-			-- and a larger budget gets the hole open before the shell arrives
-			workers = 0,
-			frameBudgetMs = 10,
-			simplify = true, -- far fewer triangles per fragment
-			meshContent = "opaque", -- fragments hold no editable memory, however many pile up
-		},
+		-- merged over Breakable's own wall-friendly Voronoi options
+		fracture = { capColor = Color3.fromRGB(150, 140, 130) },
 	},
 }
