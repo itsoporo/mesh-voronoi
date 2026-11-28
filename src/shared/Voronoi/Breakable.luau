@@ -42,6 +42,7 @@ local DEFAULTS = {
 	-- true welds the fragments to the wall part instead of anchoring them, for walls that are part of something that
 	-- can move or fall
 	attach = false,
+	support = true, -- fragments that lose contact with the bottom of the wall fall
 	-- Voronoi options for every cut; yours are merged over these
 	fracture = {
 		workers = 0, -- wall fragments are tiny: workers cost more than they save
@@ -561,7 +562,7 @@ function Breakable:_apply(
 
 		-- anything no longer connected to the ground falls (walls only, not floors)
 		local frame, up = upright(root)
-		if thin ~= up then
+		if options.support and thin ~= up then
 			local boxes = {}
 			for i, record in self._standing do
 				boxes[i] = boxIn(frame, record.part)

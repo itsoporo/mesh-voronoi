@@ -276,6 +276,23 @@ return function(lib)
 			assert(#failures == 0, table.concat(failures, "; "))
 		end,
 
+		-- a part held from elsewhere (a panel welded into a building) keeps what the hole leaves, wherever it hangs
+		support_can_be_off = function()
+			local Breakable = load()
+			local part = newWall()
+			part.Size = Vector3.new(6, 24, 2)
+			part.CFrame = CFrame.new(260, 12, 0)
+			local wall = Breakable.new(part, with({ holeRadius = 6, support = false, minFragmentVolume = 0 }))
+			local report = wall:hit(Vector3.new(260, 12, -1), Vector3.zAxis, 2)
+			local above = 0
+			for _, fragment in wall:fragments() do
+				above += if fragment.Position.Y > 12 then 1 else 0
+			end
+			wall:destroy()
+			part:Destroy()
+			assert(report.dropped == 0 and above > 0, `{report.dropped} dropped, {above} above the hole`)
+		end,
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()

@@ -81,6 +81,7 @@ argument to open the hole exactly on impact.
 |---|---|---|
 | `holeRadius` | 3 | studs; real holes come out slightly larger. `hit`'s fifth argument overrides it per shot |
 | `attach` | false | weld fragments to the wall part instead of anchoring them |
+| `support` | true | fragments that lose contact with the bottom fall; turn off for parts held from elsewhere |
 | `rings` | `false` | custom hole layout: `{ { distance, count, flies? }, ... }`, distances in hole radii |
 | `maxHits` | 8 | the wall collapses on this hit |
 | `collapseBelow` | 0.45 | ...or when this fraction of material is left |
