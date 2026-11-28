@@ -291,10 +291,11 @@ local function removeDebris(entry: any)
 	end
 end
 
--- A thrown piece's tumble, uneven on purpose: anything from barely turning to `spin`, less the bigger the piece.
+-- A thrown piece's tumble. Its size decides the pace (up to about 4 studs across it may reach `spin`; a 20 stud chunk
+-- turns at a seventh of that), with some chance on top so that no two turn alike.
 function Breakable:_tumble(part: BasePart, random: Random, share: number?): Vector3
-	local heft = math.clamp(5 / part.Size.Magnitude, 0.3, 1)
-	return random:NextUnitVector() * self.settings.spin * (share or 1) * heft * random:NextNumber(0.1, 1)
+	local heft = math.clamp((4 / part.Size.Magnitude) ^ 1.2, 0.12, 1)
+	return random:NextUnitVector() * self.settings.spin * (share or 1) * heft * random:NextNumber(0.6, 1)
 end
 
 -- Welds a fragment to the wall part, which carries it wherever the wall goes.

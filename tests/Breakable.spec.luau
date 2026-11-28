@@ -467,24 +467,38 @@ return function(lib)
 			end
 		end),
 
-		-- rubble tumbles unevenly: nothing faster than `spin`, some barely turning, and big chunks slowest
-		pieces_tumble_unevenly = test({ spin = 4 }, function(wall, part, Breakable)
+		-- rubble has weight: nothing faster than `spin`, big chunks turn far slower than small ones, and no two alike
+		pieces_tumble_by_their_size = test({ spin = 4 }, function(wall, part, Breakable)
+			part.Size = Vector3.new(60, 30, 2)
 			local point, direction = face(part, 0, 0)
 			wall:hit(point, direction, 1)
 			wall:collapse(point, direction)
-			local slowest, fastest, count, big = math.huge, 0, 0, 0
+			local small, big = {}, {}
 			for _, piece in workspace.VoronoiDebris:GetChildren() do
-				if Breakable.rootOf(piece) == part then
-					local turning = piece.AssemblyAngularVelocity.Magnitude
-					slowest, fastest, count = math.min(slowest, turning), math.max(fastest, turning), count + 1
-					if piece.Size.Magnitude > 10 then
-						big += 1
-						assert(turning <= 2.01, `a big chunk turns at {turning}`)
+				if Breakable.rootOf(piece) == part and piece.AssemblyLinearVelocity.Magnitude > 5 then
+					local turning, size = piece.AssemblyAngularVelocity.Magnitude, piece.Size.Magnitude
+					assert(turning <= 4.01, `a piece turns at {turning}`)
+					if size < 9 then
+						table.insert(small, turning)
+					elseif size > 15 then
+						table.insert(big, turning)
 					end
 				end
 			end
-			assert(count > 10 and fastest <= 4.01, `{count} pieces, fastest {fastest}`)
-			assert(slowest < 1 and fastest > 1.5, `from {slowest} to {fastest}`)
+			assert(#small >= 3 and #big >= 3, `{#small} small, {#big} big`)
+			local function mean(list)
+				local sum = 0
+				for _, v in list do
+					sum += v
+				end
+				return sum / #list
+			end
+			assert(mean(small) >= mean(big) * 3, `small {mean(small)}, big {mean(big)}`)
+			table.sort(big)
+			table.sort(small)
+			-- weight, not chance, decides: every small piece out-spins every big one
+			assert(small[1] > big[#big] * 1.5, `slowest small piece {small[1]}, fastest big one {big[#big]}`)
+			assert(small[#small] - small[1] > 0.3, "small pieces all turn alike")
 		end),
 
 		thrown_pieces_take_the_debris_group = function()
