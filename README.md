@@ -86,6 +86,8 @@ argument to open the hole exactly on impact.
 | `swapDelay` | 0 | seconds the parts a cut replaces stay visible, no longer solid, while clients load the new meshes |
 | `lift` | 0 | studs per second upwards on everything thrown |
 | `debrisGravity` | 1 | share of gravity loose pieces feel |
+| `spin` | 6 | radians per second: the fastest a thrown piece tumbles; uneven, big pieces slowest |
+| `debrisGroup` | false | collision group for loose pieces |
 | `rings` | `false` | custom hole layout: `{ { distance, count, flies? }, ... }`, distances in hole radii |
 | `maxHits` | 8 | the wall collapses on this hit |
 | `collapseBelow` | 0.45 | ...or when this fraction of material is left |

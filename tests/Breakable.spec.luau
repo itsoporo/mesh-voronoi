@@ -467,6 +467,54 @@ return function(lib)
 			end
 		end),
 
+		-- rubble tumbles unevenly: nothing faster than `spin`, some barely turning, and big chunks slowest
+		pieces_tumble_unevenly = test({ spin = 4 }, function(wall, part, Breakable)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			wall:collapse(point, direction)
+			local slowest, fastest, count, big = math.huge, 0, 0, 0
+			for _, piece in workspace.VoronoiDebris:GetChildren() do
+				if Breakable.rootOf(piece) == part then
+					local turning = piece.AssemblyAngularVelocity.Magnitude
+					slowest, fastest, count = math.min(slowest, turning), math.max(fastest, turning), count + 1
+					if piece.Size.Magnitude > 10 then
+						big += 1
+						assert(turning <= 2.01, `a big chunk turns at {turning}`)
+					end
+				end
+			end
+			assert(count > 10 and fastest <= 4.01, `{count} pieces, fastest {fastest}`)
+			assert(slowest < 1 and fastest > 1.5, `from {slowest} to {fastest}`)
+		end),
+
+		thrown_pieces_take_the_debris_group = function()
+			local PhysicsService = game:GetService("PhysicsService")
+			local added = not PhysicsService:IsCollisionGroupRegistered("zzDebrisTest")
+			if added then
+				PhysicsService:RegisterCollisionGroup("zzDebrisTest")
+			end
+			local ok, err = pcall(test({ debrisCollides = true, debrisGroup = "zzDebrisTest" }, function(wall, part, Breakable)
+				local point, direction = face(part, 0, 0)
+				wall:hit(point, direction, 1)
+				task.wait(0.3)
+				local count = 0
+				for _, piece in workspace.VoronoiDebris:GetChildren() do
+					if Breakable.rootOf(piece) == part then
+						assert(piece.CollisionGroup == "zzDebrisTest" and piece.CanCollide, `{piece.CollisionGroup} {piece.CanCollide}`)
+						count += 1
+					end
+				end
+				assert(count > 0)
+				for _, fragment in wall:fragments() do
+					assert(fragment.CollisionGroup ~= "zzDebrisTest", "standing pieces must keep their group")
+				end
+			end))
+			if added then
+				PhysicsService:UnregisterCollisionGroup("zzDebrisTest")
+			end
+			assert(ok, err)
+		end,
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()

@@ -43,6 +43,8 @@ local DEFAULTS = {
 	-- meshes never sees a gap
 	swapDelay = 0,
 	debrisCollides = true,
+	debrisGroup = false :: any, -- a collision group for loose pieces, e.g. one that passes through players
+	spin = 6, -- radians per second: the fastest a thrown piece tumbles; most turn slower, big ones slowest
 	rings = false :: any, -- { Ring } to lay out each hole's sites differently; false for the standard 25
 	-- true welds the fragments to the wall part instead of anchoring them, for walls that are part of something that
 	-- can move or fall
@@ -289,6 +291,12 @@ local function removeDebris(entry: any)
 	end
 end
 
+-- A thrown piece's tumble, uneven on purpose: anything from barely turning to `spin`, less the bigger the piece.
+function Breakable:_tumble(part: BasePart, random: Random, share: number?): Vector3
+	local heft = math.clamp(5 / part.Size.Magnitude, 0.3, 1)
+	return random:NextUnitVector() * self.settings.spin * (share or 1) * heft * random:NextNumber(0.1, 1)
+end
+
 -- Welds a fragment to the wall part, which carries it wherever the wall goes.
 local function attach(part: BasePart, root: BasePart)
 	local weld = Instance.new("WeldConstraint")
@@ -310,6 +318,9 @@ function Breakable:_throw(record: any, velocity: Vector3, spin: Vector3)
 	part.CanQuery = false -- shots and clicks pass through rubble
 	part.CanTouch = false
 	part.CanCollide = false
+	if options.debrisGroup then
+		part.CollisionGroup = options.debrisGroup
+	end
 	part.Parent = folder(DEBRIS_FOLDER)
 	if RunService:IsRunning() and RunService:IsServer() then
 		part:SetNetworkOwner(nil)
@@ -571,17 +582,14 @@ function Breakable:_apply(
 		end
 
 		local report = { targets = #targets + #whole, flying = 0, dropped = 0, standing = 0, collapsed = false, remaining = 0, seconds = seconds }
-		local function spin(scale: number): Vector3
-			return random:NextUnitVector() * scale
-		end
 		local function drop(record: any)
 			report.dropped += 1
-			self:_throw(record, Vector3.zero, spin(2))
+			self:_throw(record, Vector3.zero, self:_tumble(record.part, random, 0.5))
 		end
 
 		local function launch(record: any)
 			report.flying += 1
-			self:_throw(record, self:_blast(record.part, position, direction, random), spin(14))
+			self:_throw(record, self:_blast(record.part, position, direction, random), self:_tumble(record.part, random))
 		end
 
 		for _, record in whole do
@@ -649,7 +657,7 @@ function Breakable:_apply(
 			self.collapsed = true
 			report.collapsed = true
 			for _, record in self._standing do
-				self:_throw(record, self:_blast(record.part, position, direction, random), spin(14))
+				self:_throw(record, self:_blast(record.part, position, direction, random), self:_tumble(record.part, random))
 			end
 			table.clear(self._standing)
 		end
@@ -733,9 +741,9 @@ function Breakable:collapse(impact: Vector3?, direction: Vector3?): number
 	for _, record in self._standing do
 		if impact and direction then
 			local velocity = self:_blast(record.part, impact, direction.Unit, random)
-			self:_throw(record, velocity, random:NextUnitVector() * 14)
+			self:_throw(record, velocity, self:_tumble(record.part, random))
 		else
-			self:_throw(record, random:NextUnitVector() * self.settings.spread * 0.2, random:NextUnitVector() * 3)
+			self:_throw(record, random:NextUnitVector() * self.settings.spread * 0.2, self:_tumble(record.part, random, 0.5))
 		end
 	end
 	table.clear(self._standing)
