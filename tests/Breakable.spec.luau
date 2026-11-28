@@ -145,6 +145,127 @@ return function(lib)
 			assert(done and report == nil and #wall:fragments() == 0 and wall.collapsed)
 		end),
 
+		-- walls one behind the other take one hole when they are cut with the same sites
+		layers_share_a_layout = test(nil, function(front, part, Breakable)
+			local other = newWall()
+			other.CFrame = part.CFrame * CFrame.new(0, 0, 2.1) * CFrame.Angles(0, math.pi, 0)
+			local back = Breakable.new(other, with())
+			local ok, err = pcall(function()
+				local point, direction = face(part, 1, 0.5)
+				local sites, flies = Breakable.holeSites(part.CFrame, part.Size, point, 4, 9)
+				-- all sites in one plane cut straight through, so both layers show the same outline
+				for i, site in sites do
+					local at = part.CFrame:PointToObjectSpace(site)
+					sites[i] = part.CFrame:PointToWorldSpace(Vector3.new(at.X, at.Y, 0))
+				end
+				local layout = { sites = sites, flies = flies }
+				front:hit(point, direction, 9, nil, 4, layout)
+				back:hit(point + direction * 2.1, direction, 9, nil, 4, layout)
+				local function open(wall, x, y): boolean
+					local params = RaycastParams.new()
+					params.FilterType = Enum.RaycastFilterType.Include
+					params.FilterDescendantsInstances = wall:fragments()
+					local from = part.CFrame:PointToWorldSpace(Vector3.new(x, y, -4))
+					return workspace:Raycast(from, direction * 12, params) == nil
+				end
+				local differ, holes = 0, 0
+				for x = -6, 8 do
+					for y = -6, 6 do
+						local a, b = open(front, x + 0.13, y + 0.17), open(back, x + 0.13, y + 0.17)
+						holes += if a then 1 else 0
+						differ += if a ~= b then 1 else 0
+					end
+				end
+				assert(holes > 20 and differ <= 2, `{holes} open points, {differ} differ between the layers`)
+			end)
+			back:destroy()
+			other:Destroy()
+			assert(ok, err)
+		end),
+
+		attached_fragments_follow_the_root = test({ attach = true }, function(wall, part)
+			part.Anchored = false
+			for i, x in { -6, 6 } do
+				local point, direction = face(part, x, 0)
+				wall:hit(point, direction, i)
+			end
+			local before = {}
+			for _, fragment in wall:fragments() do
+				local weld = fragment:FindFirstChildOfClass("WeldConstraint")
+				assert(weld and weld.Part0 == part and weld.Part1 == fragment, "not welded to the wall")
+				assert(not fragment.Anchored and fragment.Massless)
+				before[fragment] = fragment.Position
+			end
+			assert(next(before), "nothing stands")
+			for _, loose in workspace.VoronoiDebris:GetChildren() do
+				assert(not loose:FindFirstChildOfClass("WeldConstraint"), "debris is still welded")
+			end
+			part.CFrame += Vector3.new(0, 10, 0)
+			for fragment, position in before do
+				local moved = fragment.Position - position
+				assert((moved - Vector3.new(0, 10, 0)).Magnitude < 0.01, `fragment moved {moved}`)
+			end
+			local standing = wall:fragments()
+			wall:collapse()
+			for _, fragment in standing do
+				assert(not fragment:FindFirstChildOfClass("WeldConstraint"), "collapsed pieces are still welded")
+			end
+		end),
+
+		wall_that_moves_during_a_cut = test({ attach = true }, function(wall, part)
+			part.Anchored = false
+			for hit, x in { -6, 6 } do
+				local point, direction = face(part, x, 0)
+				local done = false
+				task.spawn(function()
+					wall:hit(point, direction, hit, os.clock() + 0.4)
+					done = true
+				end)
+				task.wait(0.1)
+				part.CFrame += Vector3.new(0, 20, 0)
+				local started = os.clock()
+				while not done and os.clock() - started < 10 do
+					task.wait()
+				end
+				for _, fragment in wall:fragments() do
+					local at = part.CFrame:PointToObjectSpace(fragment.Position)
+					assert(math.abs(at.X) <= 15 and math.abs(at.Y) <= 7 and math.abs(at.Z) <= 1, `hit {hit}: left behind at {at}`)
+				end
+			end
+		end),
+
+		-- whichever way the part is turned, what loses its footing is what is above the hole in the world
+		support_follows_world_down = function()
+			local Breakable = load()
+			local turns = {
+				upright = { size = Vector3.new(6, 24, 2), turn = CFrame.identity },
+				upsideDown = { size = Vector3.new(6, 24, 2), turn = CFrame.Angles(0, 0, math.pi) },
+				onItsSide = { size = Vector3.new(24, 6, 2), turn = CFrame.Angles(0, 0, math.pi / 2) },
+			}
+			local failures = {}
+			for name, case in turns do
+				local part = newWall()
+				part.Size = case.size
+				part.CFrame = CFrame.new(260, 12, 0) * case.turn
+				local wall = Breakable.new(part, with({ holeRadius = 6 }))
+				wall:hit(Vector3.new(260, 12, -1), Vector3.zAxis, 2)
+				local above, below = 0, 0
+				for _, fragment in wall:fragments() do
+					if fragment.Position.Y > 12 then
+						above += 1
+					else
+						below += 1
+					end
+				end
+				if above > 0 or below == 0 then
+					table.insert(failures, `{name}: {above} stand above the hole, {below} below`)
+				end
+				wall:destroy()
+				part:Destroy()
+			end
+			assert(#failures == 0, table.concat(failures, "; "))
+		end,
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()

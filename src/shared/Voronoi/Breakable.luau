@@ -18,6 +18,7 @@ local TweenService = game:GetService("TweenService")
 local Voronoi = require(script.Parent)
 
 local ROOT_LINK = "BreakableRoot"
+local ATTACHMENT = "BreakableWeld"
 local FRAGMENT_FOLDER = "VoronoiWalls"
 local DEBRIS_FOLDER = "VoronoiDebris"
 local FADE_SECONDS = 0.5
@@ -38,6 +39,9 @@ local DEFAULTS = {
 	spread = 25, -- studs per second away from the shot line
 	debrisCollides = true,
 	rings = false :: any, -- { Ring } to lay out each hole's sites differently; false for the standard 25
+	-- true welds the fragments to the wall part instead of anchoring them, for walls that are part of something that
+	-- can move or fall
+	attach = false,
 	-- Voronoi options for every cut; yours are merged over these
 	fracture = {
 		workers = 0, -- wall fragments are tiny: workers cost more than they save
@@ -50,6 +54,9 @@ local DEFAULTS = {
 -- Sites of one hole: `count` of them around the impact at `distance` hole radii. `flies` says whether their cells are
 -- blown out; left out, a cell flies if its site is closer than the radius.
 export type Ring = { distance: number, count: number, flies: boolean? }
+
+-- Ready made sites for one hit, as `holeSites` returns them. Walls hit with the same layout get the same hole.
+export type Layout = { sites: { Vector3 }, flies: { boolean } }
 
 local STANDARD_RINGS: { Ring } = {
 	{ distance = 0, count = 1 },
@@ -87,6 +94,22 @@ end
 
 local function component(v: Vector3, axis: number): number
 	return if axis == 1 then v.X elseif axis == 2 then v.Y else v.Z
+end
+
+local UNIT = { Vector3.xAxis, Vector3.yAxis, Vector3.zAxis }
+
+-- A frame on the part whose Y is the part's own axis closest to world up, and which of its axes that is.
+local function upright(part: BasePart): (CFrame, number)
+	local rotation = part.CFrame.Rotation
+	local axis, lean = 2, rotation.YVector.Y
+	for index, vector in { [1] = rotation.XVector, [3] = rotation.ZVector } do
+		if math.abs(vector.Y) > math.abs(lean) + 1e-3 then
+			axis, lean = index, vector.Y
+		end
+	end
+	local up = rotation:VectorToWorldSpace(UNIT[axis]) * (if lean < 0 then -1 else 1)
+	local right = rotation:VectorToWorldSpace(UNIT[axis % 3 + 1])
+	return CFrame.fromMatrix(part.Position, right, up), axis
 end
 
 -- Sites for one hit, in world space, and for each whether its cell is blown out.
@@ -259,9 +282,23 @@ local function removeDebris(entry: any)
 	end
 end
 
+-- Welds a fragment to the wall part, which carries it wherever the wall goes.
+local function attach(part: BasePart, root: BasePart)
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = ATTACHMENT
+	weld.Part0 = root
+	weld.Part1 = part
+	weld.Parent = part
+end
+
 function Breakable:_throw(record: any, velocity: Vector3, spin: Vector3)
 	local options = self.settings
 	local part = record.part :: BasePart
+	local weld = part:FindFirstChild(ATTACHMENT)
+	if weld then
+		weld:Destroy()
+		part.Massless = false
+	end
 	part.Anchored = false
 	part.CanQuery = false -- shots and clicks pass through rubble
 	part.CanTouch = false
@@ -324,7 +361,14 @@ function Breakable:_solidAt(position: Vector3, direction: Vector3): boolean
 	return found ~= nil
 end
 
-function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, applyAt: number?, holeRadius: number?)
+function Breakable:_apply(
+	position: Vector3,
+	direction: Vector3,
+	seed: number,
+	applyAt: number?,
+	holeRadius: number?,
+	layout: Layout?
+)
 	local options = self.settings
 	local root = self.root :: BasePart
 	local generation = self._generation
@@ -340,7 +384,12 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 	end
 
 	local radius = holeRadius or options.holeRadius
-	local sites, flies = Breakable.holeSites(root.CFrame, root.Size, position, radius, seed, options.rings or nil)
+	local sites, flies
+	if layout then
+		sites, flies = layout.sites, layout.flies
+	else
+		sites, flies = Breakable.holeSites(root.CFrame, root.Size, position, radius, seed, options.rings or nil)
+	end
 	local u, v, thin = axes(root.Size)
 	local impact = root.CFrame:PointToObjectSpace(position)
 
@@ -431,6 +480,11 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 	local function commit()
 		local random = Random.new(seed)
 		local first = self.hits == 0
+		-- where each cut part is now: a wall that is part of something moving has moved since the cut began
+		local frames = {}
+		for i, cut in cuts do
+			frames[i] = cut.target.part.CFrame
+		end
 		if first then
 			self:_hideRoot()
 			self._volume = 0
@@ -474,8 +528,9 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 		end
 
 		local standingParts = folder(FRAGMENT_FOLDER)
-		for _, cut in cuts do
+		for i, cut in cuts do
 			for _, piece in cut.result.pieces do
+				piece.part.CFrame = frames[i] * CFrame.new(piece.center)
 				if first then
 					self._volume += piece.volume
 				end
@@ -489,20 +544,28 @@ function Breakable:_apply(position: Vector3, direction: Vector3, seed: number, a
 				elseif piece.volume < options.minFragmentVolume then
 					drop(record)
 				else
-					piece.part.Anchored = true
-					piece.part.Parent = standingParts
+					if options.attach then
+						piece.part.Anchored = false
+						piece.part.Massless = true
+						piece.part.Parent = standingParts
+						attach(piece.part, root)
+					else
+						piece.part.Anchored = true
+						piece.part.Parent = standingParts
+					end
 					table.insert(self._standing, record)
 				end
 			end
 		end
 
 		-- anything no longer connected to the ground falls (walls only, not floors)
-		if thin ~= 2 then
+		local frame, up = upright(root)
+		if thin ~= up then
 			local boxes = {}
 			for i, record in self._standing do
-				boxes[i] = boxIn(root.CFrame, record.part)
+				boxes[i] = boxIn(frame, record.part)
 			end
-			local held = Breakable.supported(boxes, -root.Size.Y / 2)
+			local held = Breakable.supported(boxes, -component(root.Size, up) / 2)
 			for i = #self._standing, 1, -1 do
 				if not held[i] then
 					drop(table.remove(self._standing, i))
@@ -551,9 +614,16 @@ end
 
 -- Yields until the hit has been applied. `direction` is the shot's travel direction.
 -- `applyAt` (an os.clock() time) holds the result back, e.g. until a shell arrives.
--- `radius` overrides the `holeRadius` setting for this hit.
+-- `radius` overrides the `holeRadius` setting for this hit, and `layout` its sites.
 -- Returns nil if there was nothing to hit or the wall was reset or collapsed meanwhile.
-function Breakable:hit(position: Vector3, direction: Vector3, seed: number, applyAt: number?, radius: number?)
+function Breakable:hit(
+	position: Vector3,
+	direction: Vector3,
+	seed: number,
+	applyAt: number?,
+	radius: number?,
+	layout: Layout?
+)
 	local generation = self._generation
 	-- one hit at a time: each cuts what the previous one left
 	while self._busy do
@@ -563,7 +633,7 @@ function Breakable:hit(position: Vector3, direction: Vector3, seed: number, appl
 		return nil
 	end
 	self._busy = true
-	local ok, report = pcall(self._apply, self, position, direction.Unit, seed, applyAt, radius)
+	local ok, report = pcall(self._apply, self, position, direction.Unit, seed, applyAt, radius, layout)
 	self._busy = false
 	if not ok then
 		error(report, 0)

@@ -59,8 +59,14 @@ Each hit punches a hole; chunks inside it fly along the shot and the rest can be
 again. A damaged wall cleans up after itself: small slivers and pieces no longer
 connected to the ground fall off, debris despawns and is capped across all walls, and
 the whole wall collapses after too much damage. `hit` returns `nil` when the shot goes
-through an existing hole or the wall has collapsed. Walls must stand upright (support
-is measured along the part's local Y).
+through an existing hole or the wall has collapsed. Support is measured along the part's
+axis closest to world up, so a wall may be turned any way, as long as it stands roughly
+upright or lies flat.
+
+For walls built of several parts one behind the other, give `hit` the same sites for each
+as its sixth argument, `{ sites, flies }` (see `Breakable.holeSites`); sites all in one
+plane cut straight through every layer. Set `attach` for a wall that is part of something
+that can move or fall: its fragments are then welded to the part instead of anchored.
 
 Destroying the wall part, or taking it out of `workspace`, removes its fragments and
 debris too; call `Breakable.get` again for a new part. If an error interrupts a hit,
@@ -73,6 +79,7 @@ argument to open the hole exactly on impact.
 | Setting | Default | Meaning |
 |---|---|---|
 | `holeRadius` | 3 | studs; real holes come out slightly larger. `hit`'s fifth argument overrides it per shot |
+| `attach` | false | weld fragments to the wall part instead of anchoring them |
 | `rings` | `false` | custom hole layout: `{ { distance, count, flies? }, ... }`, distances in hole radii |
 | `maxHits` | 8 | the wall collapses on this hit |
 | `collapseBelow` | 0.45 | ...or when this fraction of material is left |

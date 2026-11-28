@@ -76,6 +76,27 @@ return function(lib)
 			MeshReader.clearCache()
 			assert(MeshReader.read(suzanne, true) ~= first)
 		end,
+		one_read_per_asset = function()
+			local MeshReader, MeshData = load()
+			local part = transformed()
+			local real, reads = MeshReader.createEditable, 0
+			MeshReader.createEditable = function(content)
+				reads += 1
+				return real(content)
+			end
+			MeshReader.clearCache()
+			MeshReader.read(suzanne, true)
+			local scaled = MeshReader.read(part, true)
+			MeshReader.read(part, false)
+			MeshReader.createEditable = real
+			assert(reads == 1, `{reads} reads of one asset`)
+			extentMatches(part, scaled, MeshData)
+			-- the same geometry as reading it at that size in the first place
+			MeshReader.clearCache()
+			local fresh = MeshReader.read(part, true)
+			assert(#fresh.positions == #scaled.positions and #fresh.tris == #scaled.tris)
+			assert(math.abs(MeshData.volume(fresh) - MeshData.volume(scaled)) < 1e-4)
+		end,
 		-- the same inputs must give the same bytes however long the session has run
 		repeatable = function()
 			local MeshReader, MeshData = load()
