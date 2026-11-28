@@ -183,6 +183,16 @@ return function(lib)
 			assert(ok, err)
 		end),
 
+		-- a layout says where the hole is, so a part the shot line misses still loses what the hole covers
+		layout_cuts_beside_the_shot = test(nil, function(wall, part, Breakable)
+			wall:hit((face(part, -8, 0)), part.CFrame.LookVector * -1, 1)
+			local point, direction = face(part, 16, 0) -- one stud past the end of the wall
+			local sites, flies = Breakable.holeSites(part.CFrame, part.Size, point, 4, 3)
+			local report = wall:hit(point, direction, 3, nil, 4, { sites = sites, flies = flies })
+			assert(report and report.flying > 0, "nothing was cut")
+			assert(not solidAt(wall, part, 14.2, 0.1), "the end of the wall still stands")
+		end),
+
 		attached_fragments_follow_the_root = test({ attach = true }, function(wall, part)
 			part.Anchored = false
 			for i, x in { -6, 6 } do

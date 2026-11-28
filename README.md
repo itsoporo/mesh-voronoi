@@ -65,7 +65,8 @@ upright or lies flat.
 
 For walls built of several parts one behind the other, give `hit` the same sites for each
 as its sixth argument, `{ sites, flies }` (see `Breakable.holeSites`); sites all in one
-plane cut straight through every layer. Set `attach` for a wall that is part of something
+plane cut straight through every layer. With a layout the sites decide what is cut, even
+where the shot line misses the part. Set `attach` for a wall that is part of something
 that can move or fall: its fragments are then welded to the part instead of anchored.
 
 Destroying the wall part, or taking it out of `workspace`, removes its fragments and

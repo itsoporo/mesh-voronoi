@@ -379,7 +379,8 @@ function Breakable:_apply(
 			table.remove(self._standing, i).release()
 		end
 	end
-	if not self:_solidAt(position, direction) then
+	-- a layout says itself where the hole is, which may be beside this part's share of the shot line
+	if not layout and not self:_solidAt(position, direction) then
 		return nil
 	end
 
