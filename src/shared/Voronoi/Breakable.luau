@@ -38,6 +38,7 @@ local DEFAULTS = {
 	launchSpeed = 70, -- studs per second along the shot
 	spread = 25, -- studs per second away from the shot line
 	lift = 0, -- studs per second upwards, added to whatever a hit or a blast throws
+	debrisGravity = 1, -- the share of gravity loose pieces feel; below 1 they fall slower and stay in view longer
 	-- seconds the parts a cut replaces stay visible (no longer solid), so a client that is still loading the new
 	-- meshes never sees a gap
 	swapDelay = 0,
@@ -312,6 +313,16 @@ function Breakable:_throw(record: any, velocity: Vector3, spin: Vector3)
 	part.Parent = folder(DEBRIS_FOLDER)
 	if RunService:IsRunning() and RunService:IsServer() then
 		part:SetNetworkOwner(nil)
+	end
+	if options.debrisGravity < 1 then
+		local attachment = Instance.new("Attachment")
+		attachment.Parent = part
+		local force = Instance.new("VectorForce")
+		force.RelativeTo = Enum.ActuatorRelativeTo.World
+		force.ApplyAtCenterOfMass = true
+		force.Attachment0 = attachment
+		force.Force = Vector3.yAxis * part.AssemblyMass * workspace.Gravity * (1 - options.debrisGravity)
+		force.Parent = part
 	end
 	part.AssemblyLinearVelocity = velocity
 	part.AssemblyAngularVelocity = spin

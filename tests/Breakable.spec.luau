@@ -419,6 +419,32 @@ return function(lib)
 			assert(count > 0 and up / count > 35, `{count} pieces, mean lift {up / math.max(count, 1)}`)
 		end),
 
+		-- loose pieces collide with nothing, so softer gravity is what keeps an explosion in view
+		debris_gravity_softens_the_fall = test({ debrisGravity = 0.35 }, function(wall, part, Breakable)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			wall:collapse(point, direction)
+			local count = 0
+			for _, piece in workspace.VoronoiDebris:GetChildren() do
+				if Breakable.rootOf(piece) == part then
+					local force = piece:FindFirstChildOfClass("VectorForce")
+					assert(force and force.Attachment0 and force.RelativeTo == Enum.ActuatorRelativeTo.World, "no lift on a piece")
+					local expected = piece.AssemblyMass * workspace.Gravity * 0.65
+					assert(math.abs(force.Force.Y - expected) < expected * 0.01 and force.Force.X == 0 and force.Force.Z == 0, `force {force.Force}, expected {expected}`)
+					count += 1
+				end
+			end
+			assert(count > 3, `{count} pieces`)
+		end),
+
+		debris_falls_normally_by_default = test(nil, function(wall, part, Breakable)
+			local point, direction = face(part, 0, 0)
+			wall:hit(point, direction, 1)
+			for _, piece in workspace.VoronoiDebris:GetChildren() do
+				assert(Breakable.rootOf(piece) ~= part or not piece:FindFirstChildOfClass("VectorForce"))
+			end
+		end),
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()
