@@ -83,7 +83,7 @@ argument to open the hole exactly on impact.
 | `holeRadius` | 3 | studs; real holes come out slightly larger. `hit`'s fifth argument overrides it per shot |
 | `attach` | false | weld fragments to the wall part instead of anchoring them |
 | `support` | true | fragments that lose contact with the bottom fall; turn off for parts held from elsewhere |
-| `swapDelay` | 0 | seconds the parts a cut replaces stay visible, no longer solid, while clients load the new meshes |
+| `swapDelay` | 0 | seconds the parts a cut replaces stay visible, no longer solid, while clients load the new meshes; thrown pieces then start just outside the wall, so they are seen at once |
 | `lift` | 0 | studs per second upwards on everything thrown |
 | `debrisGravity` | 1 | share of gravity loose pieces feel |
 | `spin` | 6 | radians per second: the fastest a thrown piece tumbles; uneven, big pieces slowest |

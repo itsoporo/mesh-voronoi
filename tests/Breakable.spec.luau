@@ -515,6 +515,33 @@ return function(lib)
 			assert(ok, err)
 		end,
 
+		-- the old surface hides the hole while it lingers: what is thrown starts outside it, so it is seen at once
+		thrown_pieces_start_clear_of_a_lingering_wall = function()
+			local seen = {}
+			for _, delay in { 0.4, 0 } do
+				test({ swapDelay = delay, spread = 40, launchSpeed = 15 }, function(wall, part, Breakable)
+					local point, direction = face(part, 0, 0)
+					wall:hit(point, direction, 4)
+					local inside, count = 0, 0
+					for _, piece in workspace.VoronoiDebris:GetChildren() do
+						local velocity = part.CFrame:VectorToObjectSpace(piece.AssemblyLinearVelocity)
+						if Breakable.rootOf(piece) == part and velocity.Magnitude > 5 then
+							local depth = part.CFrame:PointToObjectSpace(piece.Position).Z
+							count += 1
+							if math.abs(depth) < part.Size.Z - 0.05 then
+								inside += 1
+							elseif delay > 0 then
+								assert(depth * velocity.Z >= 0, `a piece starts at depth {depth} flying {velocity.Z}`)
+							end
+						end
+					end
+					seen[delay] = { inside = inside, count = count }
+				end)()
+			end
+			assert(seen[0.4].count > 3 and seen[0.4].inside == 0, `{seen[0.4].inside} of {seen[0.4].count} start hidden`)
+			assert(seen[0].inside == seen[0].count, "without a lingering wall they start where they were cut")
+		end,
+
 		hole_sites = function()
 			local Breakable = load()
 			local part = newWall()

@@ -589,7 +589,15 @@ function Breakable:_apply(
 
 		local function launch(record: any)
 			report.flying += 1
-			self:_throw(record, self:_blast(record.part, position, direction, random), self:_tumble(record.part, random))
+			local velocity = self:_blast(record.part, position, direction, random)
+			if options.swapDelay > 0 then
+				-- the old surface still covers the hole: start outside the face it flies towards, or it is not seen
+				local depth = component(root.CFrame:PointToObjectSpace(record.part.Position), thin)
+				local side = if component(root.CFrame:VectorToObjectSpace(velocity), thin) >= 0 then 1 else -1
+				local shift = side * component(root.Size, thin) - depth
+				record.part.CFrame += root.CFrame:VectorToWorldSpace(UNIT[thin] * shift)
+			end
+			self:_throw(record, velocity, self:_tumble(record.part, random))
 		end
 
 		for _, record in whole do
